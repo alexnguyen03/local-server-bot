@@ -29,11 +29,12 @@ echo "   (JDK 21 for Jib and docker.io for Dockerfile builds: install only when 
 echo ">> [2/6] Deploy scripts -> $D/bin"
 mkdir -p "$D/bin" "$D/bot" "$D/uat"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-for f in build-local deploy deploy-bot deploy-core.sh resolve-tag.sh; do
+for f in build-local deploy deploy-bot deploy-core.sh resolve-tag.sh lsb; do
   sed 's/\r$//' "$SRC/bin/$f" > "$tmp"
   bash -n "$tmp" || { echo "!! Syntax error: $f"; exit 1; }
   install -m 755 "$tmp" "$D/bin/$f"
 done
+ln -sf "$D/bin/lsb" /usr/local/bin/lsb 2>/dev/null || echo "   (couldn't symlink lsb into /usr/local/bin, run it as $D/bin/lsb instead)"
 
 echo ">> [3/6] Bot -> $D/bot"
 sed 's/\r$//' "$SRC/bot/bot.py" > "$D/bot/bot.py"

@@ -1,0 +1,40 @@
+name: Release
+
+# Keeps a single rolling "latest" GitHub Release in sync with main, so the one-line
+# installer (install.sh at the repo root) always has something to download.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check scripts
+        run: |
+          set -e
+          for f in src/bin/*; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+          python3 -m py_compile src/bot/bot.py
+          jq empty ops/structure.json.example
+          bash -n install.sh
+
+      - name: Package
+        run: tar czf local-server-bot.tar.gz src ops examples
+
+      - name: Publish rolling "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest local-server-bot.tar.gz \
+            --title "latest" \
+            --notes "Rolling build from $(git rev-parse --short HEAD)" \
+            --target "$GITHUB_SHA"

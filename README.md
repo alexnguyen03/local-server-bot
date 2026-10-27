@@ -49,16 +49,17 @@ flowchart LR
 On LS (a Linux machine with systemd, or a Windows PC with WSL2):
 
 ```bash
-# Linux
-git clone <repo-url> && cd local-server-bot
-sudo bash ops/install.sh
+# Linux — no clone needed, downloads the latest release and installs it
+curl -fsSL https://raw.githubusercontent.com/alexnguyen03/local-server-bot/main/install.sh | sudo bash
 
 # Windows (runs inside WSL)
-git clone <repo-url> && cd local-server-bot
+git clone https://github.com/alexnguyen03/local-server-bot.git && cd local-server-bot
 install.cmd
 ```
 
 Run the same command again whenever the script tells you something is missing — on the first run it creates `ops/structure.json` and `/devops/bot/.env` from the samples and stops so you can fill in `BOT_TOKEN`/`ALLOWED_CHAT_ID` (get it via `/id` in the group) and `GH_REPO`/`APP`/`DOCKHAND_STACK` in each service's `service.env`. Safe to run repeatedly (it's an upsert) — it never overwrites config/secrets you've already filled in. Once it's done, type `/ping` in the Telegram group to check. Details: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+From then on, `lsb install` (now on PATH) re-fetches the latest build and re-runs the installer from anywhere — no need to re-run the `curl` line. `lsb deploy`/`lsb status`/`lsb doctor` wrap the scripts below for convenience.
 
 ## Read in this order
 
@@ -74,9 +75,12 @@ src/bin/deploy-core.sh  mirror/verify, update the Dockhand stack, health check, 
 src/bin/deploy-bot      the safe gateway between the bot and deploy (allowlist, syntax checks)
 src/bin/build-local     build on LS (Jib or Docker) and push straight to CS
 src/bin/resolve-tag.sh  find the latest tag on GHCR (flow 1)
+src/bin/lsb             CLI wrapper (lsb install/deploy/status/doctor), installed onto PATH
 examples/               sample config (no real secrets)
 ops/                    installer + systemd service so the bot restarts itself after a crash or reboot (ops/wsl/ for Windows)
+install.sh              Linux/curl one-liner: fetches the latest release and installs it, no clone needed
 install.cmd             Windows: install/update LS inside WSL with one command
+.github/workflows/      CI: syntax-checks scripts and publishes the rolling "latest" release install.sh downloads
 ```
 
 Files under `src/bin` get installed to `/devops/bin` on LS; `bot.py` runs from `/devops/bot/`.
