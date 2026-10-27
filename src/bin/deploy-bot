@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# deploy-bot "<message>"   Safe entry point for the Telegram bot. The bot only calls this script,
+# passing the message as ONE argument.
+#   deploy <env> <component> [force] [dry] [<tag>]    e.g.: /deploy uat myservice
+#   status [env]                                      show the running build of each allowed component
+#   doctor [env]                                      check service.env: what's missing (required), what's set (optional)
+#   help
+# Only deploys components listed in the allowlist file (default /devops/bot.allow, one <env>/<project>/<component> per line).
+# Anything that doesn't match the syntax is rejected before it ever reaches a shell.
+set -uo pipefail
+
+ROOT="${DEVOPS_ROOT:-/devops}"
+ALLOW="${BOT_ALLOW:-$ROOT/bot.allow}"
+DEPLOY="${DEPLOY_BIN:-$ROOT/bin/deploy}"
+TIMEOUT="${BOT_TIMEOUT:-1500}"
+
+say()  { printf '%s\n' "$*"; }
+deny() { say "DENIED: $1"; exit "${2:-64}"; }
+
+text="$*"
+[[ "$text" =~ ^[A-Za-z0-9\ /@_.-]{1,200}$ ]] || deny "invalid message"
+read -ra w <<< "${text,,}"
+cmd="${w[0]#/}"; cmd="${cmd%%@*}"        # "/deploy@BotName" in a group -> "deploy"
+
+allowed=()
+if [ -r "$ALLOW" ]; then
+  while IFS= read -r l; do l="${l%$'\r'}"; [[ "$l" =~ ^[[:space:]]*(#|$) ]] || allowed+=("$l"); done < "$ALLOW"
+fi
+
+help() {
+  say "Commands: /deploy <env> <component> [force] [dry] [tag]   |   /status [env]   |   /doctor [env]"
+  say "Allowed: ${allowed[*]:-(none yet, create $ALLOW)}"
+}
+
+# service.env keys required for every flow, plus BUILD_BRANCH when BUILD_MODE=local.
+# (see src/bin/deploy, src/bin/build-local: that's where these keys are actually required.)
+REQUIRED_KEYS=(GH_REPO APP DOCKHAND_STACK)
+# Optional, shown so you can see what value LS is actually using (the default applies when left empty/unset).
+OPTIONAL_KEYS=(HEALTH_URL TRACK_TAG BUILD_MODE BUILD_BRANCH BUILD_TYPE BUILD_REPO BUILD_DIR
+               BUILD_CONTEXT BUILD_DOCKERFILE COMPOSE_REPO COMPOSE_PATH COMPOSE_REF)
+
+# explain an exit code so the reader knows what went wrong without looking it up
+explain() {
+  case "$1" in
+    2)   echo "could not resolve the latest tag (resolve-tag failed: GHCR_PAT wrong/expired, or the tracked tag (TRACK_TAG) doesn't exist on GHCR)" ;;
+    10)  echo "could not fetch compose from GitHub (token missing Contents:read, or wrong COMPOSE_REPO/COMPOSE_PATH/ref)" ;;
+    11)  echo "the fetched compose file is invalid (missing 'services:', or not exactly one image: line)" ;;
+    20)  echo "build on LS failed: see the '   |' lines above or the service's build.log"  ;;
+    21)  echo "LS is missing a build tool (JDK 21, Docker, git, or skopeo), see the '!!' line above" ;;
+    22)  echo "this commit just failed to build, the bot won't retry it immediately (use /redeploy to force a retry now)" ;;
+    64)  echo "bad arguments, or the name matches several places" ;;
+    66)  echo "missing folder/service.env, or service.env has no COMPOSE_REPO (and no local compose.yaml); see the 'deploy:' line above" ;;
+    75)  echo "this service is already being deployed by another run, wait and try again" ;;
+    77)  echo "not in bot.allow" ;;
+    78)  echo "service.env/common.env still has a CHANGEME value, fill it in and run again" ;;
+    124) echo "exceeded the allowed time" ;;
+    *)   echo "error during mirror/redeploy, see the '!!' lines above" ;;
+  esac
+}
+
+in_allowed() { local t; for t in "${allowed[@]}"; do [ "$t" = "$1" ] && return 0; done; return 1; }
+
+case "$cmd" in
+  help|start|"") help ;;
+
+  status)
+    env_filter="${w[1]:-}"
+    [ -z "$env_filter" ] || [[ "$env_filter" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "invalid environment name"
+    [ "${#allowed[@]}" -gt 0 ] || deny "no components in $ALLOW yet" 78
+    for t in "${allowed[@]}"; do
+      [ -z "$env_filter" ] || [ "${t%%/*}" = "$env_filter" ] || continue
+      d="$ROOT/$t"
+      if [ -f "$d/last-deployed" ]; then
+        printf '%-28s %-14s %s\n' "$t" "$(cut -c1-12 "$d/last-deployed")" "$(date -r "$d/last-deployed" '+%Y-%m-%d %H:%M')"
+      else
+        printf '%-28s %s\n' "$t" "(never deployed)"
+      fi
+    done
+    ;;
+
+  deploy)
+    env_name="${w[1]:-}"; comp="${w[2]:-}"
+    [[ "$env_name" =~ ^[a-z0-9][a-z0-9-]*$ && "$comp" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "usage: /deploy <env> <component>"
+    # look up <env>/*/<component>, must be unique
+    cands=()
+    while IFS= read -r p; do [ -f "$p/service.env" ] && cands+=("${p#"$ROOT"/}"); done \
+      < <(find "$ROOT/$env_name" -mindepth 2 -maxdepth 2 -type d -name "$comp" 2>/dev/null | sort)
+    [ "${#cands[@]}" -ge 1 ] || deny "'$comp' not found under '$env_name'" 66
+    [ "${#cands[@]}" -eq 1 ] || deny "'$comp' matches several places: ${cands[*]}" 64
+    target="${cands[0]}"
+    in_allowed "$target" || deny "$target is not allowed to deploy via the bot (add it to $ALLOW)" 77
+
+    args=("$target" --brief)
+    for x in "${w[@]:3}"; do
+      case "$x" in
+        force) args+=(--force) ;;
+        dry)   args+=(--dry-run) ;;
+        *)     if [[ "$x" =~ ^(sha-[0-9a-f]{7}|[0-9a-f]{40})$ ]]; then args+=("$x"); else deny "unknown argument: $x"; fi ;;
+      esac
+    done
+
+    [ -x "$DEPLOY" ] || [ -f "$DEPLOY" ] || deny "$DEPLOY not found" 66
+    grep -q -- '--brief' "$DEPLOY" \
+      || deny "$DEPLOY is an old build (no --brief yet). Copy the new deploy script into /devops/bin and run again." 70
+
+    say "Starting: $target"
+    timeout "$TIMEOUT" "$DEPLOY" "${args[@]}"
+    rc=$?
+    case "$rc" in
+      0)   say "RESULT: OK" ;;
+      124) say "RESULT: FAILED (rc=124): exceeded ${TIMEOUT}s"; exit 124 ;;
+      *)   say "RESULT: FAILED (rc=$rc): $(explain "$rc")"
+           [ -f "$ROOT/$target/.last-run.log" ] && say "Details: $ROOT/$target/.last-run.log"
+           exit "$rc" ;;
+    esac
+    ;;
+
+  doctor)
+    env_filter="${w[1]:-}"
+    [ -z "$env_filter" ] || [[ "$env_filter" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "invalid environment name"
+    [ "${#allowed[@]}" -gt 0 ] || deny "no components in $ALLOW yet" 78
+    bad=0
+    for t in "${allowed[@]}"; do
+      [ -z "$env_filter" ] || [ "${t%%/*}" = "$env_filter" ] || continue
+      d="$ROOT/$t"; say "== $t"
+      if [ ! -f "$d/service.env" ]; then say "   !! missing $d/service.env"; bad=1; continue; fi
+      env_name="${t%%/*}"
+      files=("$ROOT/$env_name/common.env" "$ROOT/$env_name/.secrets" "$d/service.env")
+      merged="$(for f in "${files[@]}"; do [ -f "$f" ] && { tr -d '\r' < "$f"; echo; }; done)"
+      ( set -a; . <(printf '%s\n' "$merged"); set +a   # subshell: this service's vars don't leak into the next one
+        miss=()
+        for k in "${REQUIRED_KEYS[@]}"; do v="${!k:-}"; [ -n "$v" ] && [ "$v" != CHANGEME ] || miss+=("$k"); done
+        if [ "${BUILD_MODE:-ghcr}" = local ]; then
+          v="${BUILD_BRANCH:-}"; [ -n "$v" ] && [ "$v" != CHANGEME ] || miss+=("BUILD_BRANCH (BUILD_MODE=local)")
+        fi
+        [ -n "${COMPOSE_REPO:-}" ] || [ -f "$d/compose.yaml" ] || miss+=("COMPOSE_REPO (or create $d/compose.yaml)")
+        if [ "${#miss[@]}" -gt 0 ]; then
+          say "   !! missing/unfilled: ${miss[*]}"
+        else
+          say "   ok (all required fields set)"
+        fi
+        for k in "${OPTIONAL_KEYS[@]}"; do v="${!k:-}"; say "   $k=${v:-null}"; done
+        [ "${#miss[@]}" -eq 0 ]
+      ) || bad=1
+    done
+    [ "$bad" = 0 ] || exit 78
+    ;;
+
+  *) deny "no such command: $cmd (type /help)" ;;
+esac

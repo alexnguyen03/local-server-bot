@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# deploy [<env> <component> | <env>/<project>/<component>] [<tag>] [--force] [--dry-run] [--brief]
+#   Short form, works from anywhere:            deploy uat myservice
+#   Run from inside the component's folder:      deploy
+#   Pin to exactly one build (manual rollback):  deploy uat myservice <sha-xxxxxxx or 40-char commit>
+#   --force    deploy again even if already running that exact build
+#   --dry-run  only print what would be deployed, do nothing
+#   --brief    compact output for the bot (full detail goes to deploy.log)
+set -euo pipefail
+
+ROOT="${DEVOPS_ROOT:-/devops}"
+CORE="${DEPLOY_CORE:-$ROOT/bin/deploy-core.sh}"
+RESOLVE="${RESOLVE_TAG:-$ROOT/bin/resolve-tag.sh}"
+BUILD_LOCAL="${BUILD_LOCAL:-$ROOT/bin/build-local}"
+
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
+die()   { echo "deploy: $1" >&2; exit "${2:-1}"; }
+
+target="" tag="" force=0 dry=0 brief=0 words=()
+for a in "$@"; do
+  case "$a" in
+    --force)   force=1 ;;
+    --dry-run) dry=1 ;;
+    --brief)   brief=1 ;;
+    -h|--help) usage ;;
+    sha-*)     tag="$a" ;;
+    */*)       target="$a" ;;
+    *)         if   [[ "$a" =~ ^[0-9a-f]{40}$ ]];            then tag="$a"
+               elif [[ "$a" =~ ^[a-z0-9][a-z0-9-]*$ ]];      then words+=("$a")
+               else die "unknown argument: $a (run --help)" 64; fi ;;
+  esac
+done
+
+# short form: deploy <env> <component>  ->  look up <env>/*/<component> (must be unique)
+if [ -n "$target" ] && [ "${#words[@]}" -gt 0 ]; then die "pick one form: <env>/<project>/<component> or <env> <component>" 64; fi
+if [ -z "$target" ] && [ "${#words[@]}" -gt 0 ]; then
+  [ "${#words[@]}" = 2 ] || die "usage: deploy <env> <component>   or   deploy <env>/<project>/<component>" 64
+  cands=()
+  while IFS= read -r p; do
+    [ -f "$p/service.env" ] && cands+=("${p#"$ROOT"/}")
+  done < <(find "$ROOT/${words[0]}" -mindepth 2 -maxdepth 2 -type d -name "${words[1]}" 2>/dev/null | sort)
+  case "${#cands[@]}" in
+    0) die "component '${words[1]}' not found under environment '${words[0]}'" 66 ;;
+    1) target="${cands[0]}"; echo "deploy: $target" ;;
+    *) die "name '${words[1]}' matches several places (${cands[*]}); give the full <env>/<project>/<component>" 64 ;;
+  esac
+fi
+
+# no target given: infer it from the current directory
+if [ -z "$target" ]; then
+  case "$PWD/" in
+    "$ROOT"/*) target="${PWD#"$ROOT"/}" ;;
+  esac
+  [ -n "$target" ] || usage
+  echo "deploy: inferred from current directory -> $target"
+fi
+
+re='^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$'
+[[ "$target" =~ $re ]] || die "name must look like <env>/<project>/<component>, lowercase, e.g. uat/myproject/myservice (got: $target)" 64
+[ -z "$tag" ] || [[ "$tag" =~ ^(sha-[0-9a-f]{7}|[0-9a-f]{40})$ ]] || die "invalid tag: $tag (needs sha-xxxxxxx or a 40-char commit hash)" 64
+
+env_name="${target%%/*}"
+dir="$ROOT/$target"
+[ -f "$dir/service.env" ] || die "$dir/service.env not found" 66
+
+# any value still set to CHANGEME means it hasn't been filled in yet
+files=("$ROOT/$env_name/common.env" "$dir/service.env")
+if grep -n 'CHANGEME' "${files[@]}" 2>/dev/null; then
+  die "CHANGEME values still present above, fill them in then run again" 78
+fi
+
+# load config: env-wide common -> component-specific -> secrets
+sec="$ROOT/$env_name/.secrets"
+layers=("$ROOT/$env_name/common.env" "$dir/service.env")
+if [ -f "$sec" ]; then
+  mode="$(stat -c %a "$sec")"
+  [ "$mode" = 600 ] || echo "deploy: warning - $sec has mode $mode, should be 600" >&2
+  layers+=("$sec")
+fi
+merged="$(for f in "${layers[@]}"; do [ -f "$f" ] && { tr -d '\r' < "$f"; echo; }; done)"   # tr: in case the file was edited on Windows
+set -a
+# shellcheck disable=SC1090
+. <(printf '%s\n' "$merged")
+set +a
+
+: "${GH_REPO:?service.env is missing GH_REPO}"
+: "${DOCKHAND_STACK:?service.env is missing DOCKHAND_STACK}"
+TRACK_TAG="${TRACK_TAG:-latest}"
+
+# one at a time per component: a second concurrent run waits its turn
+exec 9>"$dir/.lock"
+if ! flock -n 9; then
+  echo ">> $target is being deployed by another process (manual or automatic), waiting for a turn..."
+  _lw=$SECONDS
+fi
+flock -w "${LOCK_WAIT:-900}" 9 || die "$target is being deployed by another process" 75
+[ -n "${_lw:-}" ] && echo ">> got a turn after waiting ${_lw}s"
+
+# BUILD_MODE=local (service.env): build the image on LS from the GitHub source and push it straight
+# to the CS registry, no GHCR/GitHub Actions. Default (ghcr): pull the latest build from GHCR and mirror it to CS.
+BUILD_MODE="${BUILD_MODE:-ghcr}"
+if [ "$BUILD_MODE" = local ]; then
+  export SERVICE_DIR="$dir" SERVICE_TARGET="$target" FORCE="$force"
+  if [ -z "$tag" ]; then
+    if [ "$dry" = 1 ]; then
+      tag="$(bash "$BUILD_LOCAL" --resolve)" || { rc=$?; die "could not resolve the latest commit on branch $BUILD_BRANCH" "$rc"; }
+    else
+      tag="$(bash "$BUILD_LOCAL")" || { rc=$?; die "build on LS failed (rc=$rc), see the '!!' lines above" "$rc"; }
+    fi
+  fi
+  export SKIP_MIRROR=1      # image is already on CS, the core just checks the tag is there
+elif [ -z "$tag" ]; then
+  tag="$(bash "$RESOLVE" "$GH_REPO" "$TRACK_TAG")" || die "could not resolve the latest '$TRACK_TAG' build" 2
+fi
+
+run="$dir/.run"
+mkdir -p "$run"; chmod 700 "$run"
+
+# Fetch the compose file into .run/compose.yaml (the core reads this file).
+# COMPOSE_REPO set in service.env: fetch compose from GitHub by branch, nothing kept on disk.
+# Not set: use the local compose.yaml in the component's folder (the old way).
+#   COMPOSE_REPO=myorg/myservice       repo that holds the compose file
+#   COMPOSE_PATH=docker-compose.yml    path inside the repo (default docker-compose.yml)
+#   COMPOSE_REF=main                   branch (or tag/commit) to fetch compose from; empty = main
+#   GH_COMPOSE_TOKEN=...               in .secrets: a read-only content token (defaults to GHCR_PAT)
+fetch_compose() {
+  local repo="$COMPOSE_REPO" path="${COMPOSE_PATH:-docker-compose.yml}" ref="${COMPOSE_REF:-main}"
+  local token="${GH_COMPOSE_TOKEN:-${GHCR_PAT:-}}" api="${GH_API:-https://api.github.com}" code enc out
+  [ -n "$token" ] || die "missing GH_COMPOSE_TOKEN (or GHCR_PAT) in $sec" 78
+  enc="$(jq -rn --arg v "$ref" '$v|@uri')"
+  out="$run/compose.yaml.new"
+  code="$(curl -sS --max-time 30 -o "$out" -w '%{http_code}' \
+      -H "Authorization: Bearer $token" \
+      -H "Accept: application/vnd.github.raw+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$api/repos/$repo/contents/$path?ref=$enc" 2>/dev/null)" || code=000
+  case "$code" in
+    200) ;;
+    401) rm -f "$out"; die "401 fetching compose: GH_COMPOSE_TOKEN is wrong or expired" 10 ;;
+    403) rm -f "$out"; die "403 fetching compose: token doesn't have read access to repo $repo" 10 ;;
+    404) rm -f "$out"; die "404 fetching compose: $repo:$path not found at '$ref' (wrong path/ref, or the token has no access to the repo)" 10 ;;
+    *)   rm -f "$out"; die "error fetching compose from GitHub (HTTP $code)" 10 ;;
+  esac
+  compose_info="$repo@${ref:0:12}:$path"
+}
+
+src="$run/compose.yaml.new"
+if [ -n "${COMPOSE_REPO:-}" ]; then
+  fetch_compose                                   # writes into $src
+else
+  [ -f "$dir/compose.yaml" ] || die "service.env has no COMPOSE_REPO and there's no $dir/compose.yaml either" 66
+  cp "$dir/compose.yaml" "$src"
+  compose_info="local file $dir/compose.yaml"
+fi
+
+# validate the compose file, then write it to .run/compose.yaml (remove first so we never write through an old symlink)
+grep -q '^services:' "$src" || { rm -f "$src"; die "invalid compose file (no 'services:' line)" 11; }
+n="$(grep -cE '^[[:space:]]*image:' "$src" || true)"
+[ "$n" = 1 ] || { rm -f "$src"; die "compose has $n active 'image:' line(s); the core can only replace exactly one" 11; }
+rm -f "$run/compose.yaml"
+tr -d '\r' < "$src" > "$run/compose.yaml"; rm -f "$src"
+
+# The core only recognizes a line shaped like:  image: ${API_IMAGE:-...}   (one common image-variable convention).
+# A compose file written a different way (e.g.: image: ghcr.io/...:${IMAGE_TAG:-latest}) gets normalized here,
+# and the core will replace this line with localhost:5000/<APP>:<tag> as usual.
+if ! grep -qE '^[[:space:]]*image:[[:space:]]*\$\{API_IMAGE' "$run/compose.yaml"; then
+  sed -i -E "s|^([[:space:]]*)image:.*\$|\1image: \${API_IMAGE:-ghcr.io/${GH_REPO}:latest}|" "$run/compose.yaml"
+fi
+# This flow pulls the image already mirrored to the CS registry (localhost:5000). A 'pull_policy: never' line
+# in compose (meant for a stack built in place) makes Docker NOT pull, so the new build isn't on the machine ->
+# compose up fails and the stack gets stuck in 'created' with no container. Strip that line before sending to Dockhand.
+if grep -qE '^[[:space:]]*pull_policy:[[:space:]]*never[[:space:]]*(#.*)?$' "$run/compose.yaml"; then
+  sed -i -E '/^[[:space:]]*pull_policy:[[:space:]]*never[[:space:]]*(#.*)?$/d' "$run/compose.yaml"
+  echo "deploy: removed the 'pull_policy: never' line from compose (the image must be pulled from the CS registry)"
+fi
+csum="$(sha256sum "$run/compose.yaml" | cut -c1-64)"
+
+last="$(cat "$dir/last-deployed" 2>/dev/null || true)"
+last_compose="$(cat "$dir/last-compose" 2>/dev/null || true)"
+echo "deploy: $target  tag=$tag  (currently running: ${last:-unknown})"
+echo "deploy: compose = $compose_info  [sha256 ${csum:0:12}]"
+
+if [ "$dry" = 1 ]; then echo "deploy: --dry-run, stopping here"; exit 0; fi
+if [ "$tag" = "$last" ] && [ "$csum" = "$last_compose" ] && [ "$force" = 0 ]; then
+  echo "deploy: image and compose are both unchanged, skipping (use --force to override)"; exit 0
+fi
+[ "$tag" = "$last" ] && [ "$csum" != "$last_compose" ] && echo "deploy: image unchanged but compose changed, deploying again"
+
+# Run the deploy core inside the component's .run/, with a .env built from the layers above.
+# The core (deploy-core.sh) stays as-is and still reads its own .env next to it as before;
+# its state file also lives in .run/ so each component keeps its own state.
+cp "$CORE" "$run/deploy.sh"
+( umask 077; printf '%s\n' "$merged" > "$run/.env" )
+
+export SERVICE_DIR="$dir" SERVICE_TARGET="$target"
+
+# Strip progress-bar output before logging: remove color/control codes, drop in-progress spinner lines.
+clean_log() {
+  sed -u -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\r/\n/g' \
+    | grep --line-buffered -vE '^[[:space:]]*$|Copying (blob|config) .*\[[-=>#. [:space:]]*\]' >> "$dir/deploy.log" || true
+}
+
+set +e
+if [ "$brief" = 1 ]; then
+  # Compact mode for the bot: full detail goes to deploy.log, the screen only gets the main lines (>> and !!),
+  # plus the last 15 lines on failure. Nothing is streamed line by line; the result appears once it's done.
+  out="$dir/.last-run.log"
+  # Main lines (>> and !!) show up as they happen so the bot reports progress correctly; full detail goes to the file.
+  ( cd "$run" && bash ./deploy.sh "$tag" ) 2>&1 | tee "$out" | grep --line-buffered -E '^(>>|!!)' | cut -c1-300
+  rc=${PIPESTATUS[0]}
+  cat "$out" >> "$dir/deploy.log"
+  if [ "$rc" -ne 0 ]; then echo "--- last 15 lines ---"; tail -n 15 "$out" | cut -c1-300; fi
+elif [ -t 1 ] && [ "${NO_PTY:-0}" != 1 ] && command -v script >/dev/null 2>&1; then
+  # Running in a terminal: run the core inside a pty so skopeo shows its progress bar (piping it hides the bar).
+  script -qefc "cd '$run' && bash ./deploy.sh '$tag'" /dev/null | tee >(clean_log)
+  rc=${PIPESTATUS[0]}
+  sleep 0.3   # let the log write finish
+else
+  # Not a terminal (CI, hook, cron): keep plain line-by-line output.
+  ( cd "$run" && bash ./deploy.sh "$tag" ) 2>&1 | tee -a "$dir/deploy.log"
+  rc=${PIPESTATUS[0]}
+fi
+set -e
+
+if [ "$rc" -eq 0 ]; then
+  echo "$tag" > "$dir/last-deployed"
+  echo "$csum" > "$dir/last-compose"
+  echo "deploy: done $target -> $tag"
+else
+  echo "deploy: FAILED $target tag=$tag (rc=$rc), see $dir/deploy.log" >&2
+fi
+exit "$rc"

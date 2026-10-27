@@ -1,0 +1,6 @@
+{
+  "_comment": "Sample. Copy to ops/structure.json (gitignored) and edit it to match your real services. To add a service: add a block to the services array, then re-run install.cmd/install.sh — the bot automatically gets /deploy_<name>_<env>, /redeploy_<name>_<env>, /status_<env>, /doctor_<env>.",
+  "services": [
+    { "env": "uat", "project": "myproject", "name": "myservice", "auto": true, "dry": true }
+  ]
+}

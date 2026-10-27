@@ -1,0 +1,3 @@
+# Sample root-directory config on LS. Copy to ops/install.conf (not committed, already in .gitignore)
+# to change the path. If ops/install.conf doesn't exist, install.sh creates it from this sample on first run.
+DEVOPS_ROOT=/devops

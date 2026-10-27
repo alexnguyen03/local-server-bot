@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# build-local [--resolve]
+# Build the image on LS from the GitHub source (branch BUILD_BRANCH), push it straight to the CS registry.
+# Prints the tag (sha-xxxxxxx) to stdout; progress lines (>> / !!) go to stderr; the full build log is at $SERVICE_DIR/build.log.
+# Called by `deploy` when service.env has BUILD_MODE=local; the variables come from the environment `deploy` already loaded:
+#   GH_REPO, APP, CS_REGISTRY, REG_USER, REG_PASS, SERVICE_DIR, SERVICE_TARGET, FORCE
+#   BUILD_REPO     repo holding the source (default = GH_REPO)
+#   BUILD_BRANCH   branch to track, required (e.g. main, uat)
+#   BUILD_TYPE     jib (Quarkus/Gradle, no Docker needed)  |  docker (Dockerfile)   [default docker]
+#   BUILD_DIR      jib: the folder to run gradlew from inside the repo (e.g. backend_api)
+#   BUILD_CONTEXT, BUILD_DOCKERFILE   docker: context folder (default .) and Dockerfile name (default Dockerfile)
+#   BUILD_ARGS     extra args for gradlew / docker build
+#   BUILD_TIMEOUT  seconds, default 1200;  BUILD_RETRY_MIN  minutes to wait before retrying the same failed commit, default 30
+#   --resolve      only print the tag for the current HEAD, don't build
+set -euo pipefail
+
+resolve_only=0; [ "${1:-}" = "--resolve" ] && resolve_only=1
+log()  { echo ">> $*" >&2; }
+fail() { echo "!! $1" >&2; exit "${2:-20}"; }
+
+for v in GH_REPO APP CS_REGISTRY REG_USER REG_PASS SERVICE_DIR BUILD_BRANCH; do
+  [ -n "${!v:-}" ] || fail "build on LS: missing variable $v in service.env/common.env/.secrets" 78
+done
+REPO="${BUILD_REPO:-$GH_REPO}"
+TYPE="${BUILD_TYPE:-docker}"
+TOKEN="${GH_COMPOSE_TOKEN:-${GHCR_PAT:-}}"
+[ -n "$TOKEN" ] || fail "build on LS: missing GH_COMPOSE_TOKEN (or GHCR_PAT) in .secrets, needs Contents:read" 78
+BASE="${GH_GIT_BASE:-https://github.com}"
+BUILD_ROOT="${BUILD_ROOT:-${DEVOPS_ROOT:-/devops}/.build}"
+FAILMEMO="$SERVICE_DIR/.build-fail"
+BLOG="$SERVICE_DIR/build.log"
+
+# authenticate git via an environment variable so the token never shows up in the process list
+export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader
+GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+export GIT_CONFIG_VALUE_0
+
+sha="$(git ls-remote "$BASE/$REPO.git" "refs/heads/$BUILD_BRANCH" 2>/dev/null | awk 'NR==1{print $1}')" || true
+[ -n "$sha" ] || fail "could not read branch '$BUILD_BRANCH' of $REPO (wrong branch/repo name, or the token lacks Contents:read)" 10
+TAG="sha-${sha:0:7}"
+CREDS=(--tls-verify=false --creds "$REG_USER:$REG_PASS")
+
+if [ "$resolve_only" = 1 ]; then echo "$TAG"; exit 0; fi
+
+# image for this commit already on CS: no need to build
+if skopeo inspect "${CREDS[@]}" "docker://$CS_REGISTRY/$APP:$TAG" >/dev/null 2>&1; then
+  log "build: $REPO@${BUILD_BRANCH} ${sha:0:7} is already on CS ($APP:$TAG), skipping the build"
+  echo "$TAG"; exit 0
+fi
+
+# this commit just failed to build: don't keep retrying it (force with /redeploy or deploy --force)
+if [ -f "$FAILMEMO" ] && [ "${FORCE:-0}" != 1 ]; then
+  read -r fsha fts < "$FAILMEMO" || true
+  age=$(( $(date +%s) - ${fts:-0} ))
+  if [ "${fsha:-}" = "$sha" ] && [ "$age" -lt $(( ${BUILD_RETRY_MIN:-30} * 60 )) ]; then
+    fail "commit ${sha:0:7} failed to build $((age / 60)) minute(s) ago, will auto-retry in $(( ${BUILD_RETRY_MIN:-30} - age / 60 )) minute(s) (retry now: /redeploy). See $BLOG" 22
+  fi
+fi
+
+case "$TYPE" in
+  jib)    command -v java >/dev/null || fail "JDK not installed on LS (needs JDK 21: apt install openjdk-21-jdk)" 21 ;;
+  docker) command -v docker >/dev/null || fail "Docker not installed on LS (apt install docker.io, then systemctl enable --now docker)" 21 ;;
+  *)      fail "invalid BUILD_TYPE: $TYPE (jib or docker)" 78 ;;
+esac
+command -v git >/dev/null && command -v skopeo >/dev/null || fail "git or skopeo missing on LS" 21
+
+name="${SERVICE_TARGET:-$APP}"; name="${name//\//-}"; src="$BUILD_ROOT/$name"
+mkdir -p "$BUILD_ROOT"
+t0=$SECONDS
+log "build: $REPO@$BUILD_BRANCH ${sha:0:7} -> $CS_REGISTRY/$APP:$TAG ($TYPE)"
+: > "$BLOG"
+
+# a clean checkout of exactly this commit, never reusing an old working tree
+rm -rf "$src"; mkdir -p "$src"
+(
+  cd "$src"
+  git init -q
+  git remote add origin "$BASE/$REPO.git"
+  git fetch -q --depth 1 origin "$sha"
+  git checkout -q --detach FETCH_HEAD
+) >> "$BLOG" 2>&1 || { echo "$sha $(date +%s)" > "$FAILMEMO"; tail -n 15 "$BLOG" | cut -c1-300 | sed 's/^/   | /' >&2; fail "fetching source $REPO@${sha:0:7} failed" 20; }
+log "build: source fetched (${SECONDS}s)"
+
+# heartbeat so the bot/Telegram side knows the build is still running
+# (sleep runs in the background then is waited on, so killing this loop also kills the sleep and doesn't hold stdout open)
+( sp=0; trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+  while :; do sleep 45 & sp=$!; wait "$sp"; echo ">> still building... $((SECONDS - t0))s" >&2; done ) &
+tick=$!
+trap 'kill "$tick" 2>/dev/null || true' EXIT
+
+run_build() {
+  case "$TYPE" in
+    jib)
+      cd "$src/${BUILD_DIR:-.}"
+      [ -x ./gradlew ] || chmod +x ./gradlew
+      # Jib pushes straight to the CS registry (http, hence insecure); credentials go through the
+      # JAVA_TOOL_OPTIONS env var so every child JVM (the gradle daemon, Quarkus's worker) also gets the
+      # flag telling Jib it's fine to send credentials over HTTP
+      JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -DsendCredentialsOverHttp=true" \
+      QUARKUS_CONTAINER_IMAGE_USERNAME="$REG_USER" QUARKUS_CONTAINER_IMAGE_PASSWORD="$REG_PASS" \
+      ./gradlew imageBuild --no-daemon --build-cache \
+        -Dquarkus.container-image.build=true \
+        -Dquarkus.container-image.push=true \
+        -Dquarkus.container-image.insecure=true \
+        -DsendCredentialsOverHttp=true \
+        -Dquarkus.container-image.image="$CS_REGISTRY/$APP:$TAG" ${BUILD_ARGS:-} || return 1
+      ;;
+    docker)
+      cd "$src/${BUILD_CONTEXT:-.}"
+      img="local-build/$APP:$TAG"
+      docker build -f "${BUILD_DOCKERFILE:-Dockerfile}" -t "$img" ${BUILD_ARGS:-} . || return 1
+      # push with skopeo (already set up for CS's http registry, no need to configure insecure-registries for Docker)
+      skopeo copy --dest-tls-verify=false --dest-creds "$REG_USER:$REG_PASS" \
+        "docker-daemon:$img" "docker://$CS_REGISTRY/$APP:$TAG" || { docker rmi "$img" >/dev/null 2>&1 || true; return 1; }
+      docker rmi "$img" >/dev/null 2>&1 || true      # LS keeps no images, only CS does
+      docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+# run inside a time-limited subshell (timeout kills the whole process group, including gradle/docker)
+export src TYPE TAG CS_REGISTRY APP REG_USER REG_PASS BUILD_DIR BUILD_ARGS BUILD_CONTEXT BUILD_DOCKERFILE
+brc=0
+timeout -k 15 "${BUILD_TIMEOUT:-1200}" bash -c "$(declare -f run_build); run_build" >> "$BLOG" 2>&1 || brc=$?
+if [ "$brc" = 124 ]; then
+  echo "$sha $(date +%s)" > "$FAILMEMO"
+  fail "build was stopped after exceeding ${BUILD_TIMEOUT:-1200}s (raise BUILD_TIMEOUT in service.env if the build is genuinely slow; the first run is usually slow from downloading dependencies). Log: $BLOG" 20
+fi
+if [ "$brc" != 0 ] || ! skopeo inspect "${CREDS[@]}" "docker://$CS_REGISTRY/$APP:$TAG" >/dev/null 2>&1; then
+  echo "$sha $(date +%s)" > "$FAILMEMO"
+  # print the actual Gradle/Jib error (not just the last 25 lines, since TLS warnings can bury the real cause)
+  { grep -n -E "What went wrong|Caused by|Exception|Unauthorized|401|403|denied|FAILED" "$BLOG" | grep -v -E "Attempting again|Cannot verify|Failed to connect to https" | tail -n 15
+    echo "   ---- end of log ----"; grep -v -E "Attempting again|Cannot verify|Failed to connect to https" "$BLOG" | tail -n 15; } | cut -c1-300 | sed 's/^/   | /' >&2
+  fail "build failed after $((SECONDS - t0))s (or the image never made it to the CS registry). Full log: $BLOG" 20
+fi
+
+rm -f "$FAILMEMO"
+rm -rf "$src"
+log "build finished in $((SECONDS - t0))s: $APP:$TAG is now on CS"
+echo "$TAG"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Deploy bot (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+WorkingDirectory=@DEVOPS_ROOT@/bot
+EnvironmentFile=@DEVOPS_ROOT@/bot/.env
+ExecStart=@DEVOPS_ROOT@/bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+.env
+*.env
+!examples/*.env
+!examples/*.env.*
+.secrets
+ops/install.conf
+ops/structure.json
+bot.log*
+__pycache__/
+.build/
