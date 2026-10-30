@@ -15,6 +15,9 @@ EX="$(cd "$HERE/../examples" && pwd)"
 
 # Create install.conf from the sample if it doesn't exist yet (upsert, no real path ever in git).
 [ -f "$HERE/install.conf" ] || sed 's/\r$//' "$HERE/install.conf.example" > "$HERE/install.conf"
+# Always world-writable: this runs as root, but it's meant to be hand-edited from Windows/a GUI
+# too (e.g. through \\wsl.localhost\...), which can't write a root-only file. Not a secret.
+chmod 666 "$HERE/install.conf" 2>/dev/null || true
 . "$HERE/install.conf"
 D="${DEVOPS_ROOT:-/devops}"
 cmd="${1:-install}"
@@ -57,6 +60,8 @@ do_init() {
   jq empty "$HERE/structure.json" || { echo "!! ops/structure.json is not valid JSON"; exit 1; }
   jq -e '[.services[] | (.env and .project)] | all' "$HERE/structure.json" >/dev/null \
     || { echo "!! Every service in ops/structure.json needs env and project"; exit 1; }
+  # Always world-writable, same reasoning as install.conf above: hand-edited from Windows/a GUI too.
+  chmod 666 "$HERE/structure.json" 2>/dev/null || true
   cp "$HERE/structure.json" "$D/structure.json"
   # bot.allow and each service's folder tree are derived from structure.json -> regenerate every run, not hand-edited.
   jq -r '.services[] | "\(.env)/\(.project)"' "$HERE/structure.json" > "$D/bot.allow"
