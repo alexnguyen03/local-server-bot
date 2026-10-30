@@ -11,6 +11,8 @@
 #   BUILD_CONTEXT, BUILD_DOCKERFILE   docker: context folder (default .) and Dockerfile name (default Dockerfile)
 #   BUILD_ARGS     extra args for gradlew / docker build
 #   BUILD_TIMEOUT  seconds, default 1200;  BUILD_RETRY_MIN  minutes to wait before retrying the same failed commit, default 30
+#   LOCAL_KEEP     docker builds only: 1 = keep the just-built image on LS as a local backup, deleting
+#                  any older local-build/$APP image first. Default 0: LS keeps none, only CS does.
 #   --resolve      only print the tag for the current HEAD, don't build
 set -euo pipefail
 
@@ -112,7 +114,13 @@ run_build() {
       # push with skopeo (already set up for CS's http registry, no need to configure insecure-registries for Docker)
       skopeo copy --dest-tls-verify=false --dest-creds "$REG_USER:$REG_PASS" \
         "docker-daemon:$img" "docker://$CS_REGISTRY/$APP:$TAG" || { docker rmi "$img" >/dev/null 2>&1 || true; return 1; }
-      docker rmi "$img" >/dev/null 2>&1 || true      # LS keeps no images, only CS does
+      if [ "${LOCAL_KEEP:-0}" = 1 ]; then
+        # keep this build as a local backup; drop any older local-build image for this app first
+        docker images "local-build/$APP" --format '{{.Repository}}:{{.Tag}}' | grep -vF ":$TAG" \
+          | xargs -r docker rmi >/dev/null 2>&1 || true
+      else
+        docker rmi "$img" >/dev/null 2>&1 || true      # LS keeps no images, only CS does
+      fi
       docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
       ;;
   esac

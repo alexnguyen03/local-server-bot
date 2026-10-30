@@ -42,6 +42,7 @@ Have them type `/id` in the group to get their `user_id`. Add it to `ALLOWED_USE
 
 - To flow local: add `BUILD_MODE=local`, `BUILD_BRANCH`, `BUILD_TYPE` (+ `BUILD_DIR` if the repo is a monorepo) to `service.env`; make sure `GH_COMPOSE_TOKEN` is set in `.secrets`.
 - Back to flow GHCR: remove the `BUILD_MODE` line.
+- Local image on LS: with `BUILD_TYPE=docker`, `build-local` deletes the image it just built from LS's docker daemon right after pushing it to CS (CS is the only copy). Set `LOCAL_KEEP=1` in `service.env` to keep that one build on LS as a backup instead — it deletes any older `local-build/<APP>` image first, so only the latest stays. Doesn't apply to `BUILD_TYPE=jib` (never touches LS's docker daemon) or to flow GHCR (LS never pulls or builds an image at all, only mirrors registry-to-registry).
 
 ## Troubleshooting
 

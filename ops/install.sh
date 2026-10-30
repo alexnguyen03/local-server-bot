@@ -87,6 +87,7 @@ COMPOSE_REF=main
 #BUILD_MODE=local
 #BUILD_BRANCH=main
 #BUILD_TYPE=docker        # docker | jib
+#LOCAL_KEEP=1             # docker builds only: keep the latest build on LS as a backup (default: discard it, CS is the only copy)
 EOT
       created_env="$created_env\n  $dir/service.env"
     fi
