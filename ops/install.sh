@@ -88,19 +88,25 @@ COMPOSE_REF=main
 #BUILD_BRANCH=main
 #BUILD_TYPE=docker        # docker | jib
 EOT
-      chmod 644 "$dir/service.env"
       created_env="$created_env\n  $dir/service.env"
     fi
+    # Every run, not just on creation: fixes files made world-writable only after this line existed,
+    # and keeps it editable from Windows/a GUI through \\wsl.localhost\... (writes as a non-root user).
+    # No secret lives in service.env.
+    chmod 666 "$dir/service.env" 2>/dev/null || true
   done < "$D/bot.allow"
   [ -z "$created_env" ] || echo -e "!! Created new service.env file(s); fill in the required fields:$created_env"
 
   echo ">> Bot config"
   if [ ! -f "$D/bot/.env" ]; then
     sed 's/\r$//' "$EX/bot.env.example" > "$D/bot/.env"
-    chmod 600 "$D/bot/.env"
     echo "!! Created $D/bot/.env from the sample. Fill in BOT_TOKEN, ALLOWED_CHAT_ID, ALLOWED_USER_IDS."
     echo "   For the other files (common.env, .secrets) see examples/ and docs/OPERATIONS.md."
   fi
+  # Editable from Windows/a GUI like structure.json/service.env above. Unlike those, this one holds
+  # a real secret (BOT_TOKEN) -- widening it means anyone with filesystem access to this machine can
+  # read it. Fine for a single-admin LS; tighten back to 600 by hand if that's not your setup.
+  chmod 666 "$D/bot/.env" 2>/dev/null || true
   grep -q '^DEVOPS_ROOT=' "$D/bot/.env" || echo "DEVOPS_ROOT=$D" >> "$D/bot/.env"   # upsert: add if missing, leave other lines alone
 
   echo ">> Init done. Fill in the service.env/.env files above, then run: lsb start"
