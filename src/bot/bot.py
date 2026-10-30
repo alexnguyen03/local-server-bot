@@ -86,8 +86,8 @@ try:
 except (FileNotFoundError, json.JSONDecodeError, KeyError):
     log.warning("Could not read %s/structure.json (run ops/install.sh to create it) — no services yet", DEVOPS_ROOT)
     SERVICES = []
-# skip any block missing env/project/name instead of crashing the whole bot over one hand-edit mistake
-SERVICES = [s for s in SERVICES if isinstance(s, dict) and s.get("env") and s.get("project") and s.get("name")]
+# skip any block missing env/project instead of crashing the whole bot over one hand-edit mistake
+SERVICES = [s for s in SERVICES if isinstance(s, dict) and s.get("env") and s.get("project")]
 
 JOBS = {"ping": {"cwd": "/", "cmd": ["echo", "pong"], "timeout": 10, "desc": "Check the bot is alive"}}
 READONLY_JOBS = {"ping"}
@@ -99,12 +99,12 @@ for env in dict.fromkeys(s["env"] for s in SERVICES):   # distinct, keep first-s
     JOBS[f"doctor_{env}"] = deploy_job(f"doctor {env}", f"{env.upper()}: check what's missing and what's set in service.env", 60)
     tree_lines.append(f"└─ {env}   /status_{env}  /doctor_{env}")
     for s in (x for x in SERVICES if x["env"] == env):
-        key, base = s["name"].replace("-", "_"), f"deploy {env} {s['name']}"
-        JOBS[f"deploy_{key}_{env}"] = deploy_job(base, f"{env.upper()}: deploy {s['name']} (skipped if unchanged)")
-        JOBS[f"redeploy_{key}_{env}"] = deploy_job(f"{base} force", f"{env.upper()}: FORCE redeploy {s['name']} even if unchanged")
-        line = f"   {s['project']}/{s['name']}   /deploy_{key}_{env}  /redeploy_{key}_{env} (force)"
+        key, base = s["project"].replace("-", "_"), f"deploy {env} {s['project']}"
+        JOBS[f"deploy_{key}_{env}"] = deploy_job(base, f"{env.upper()}: deploy {s['project']} (skipped if unchanged)")
+        JOBS[f"redeploy_{key}_{env}"] = deploy_job(f"{base} force", f"{env.upper()}: FORCE redeploy {s['project']} even if unchanged")
+        line = f"   {s['project']}   /deploy_{key}_{env}  /redeploy_{key}_{env} (force)"
         if s.get("dry"):
-            JOBS[f"dry_{key}_{env}"] = deploy_job(f"{base} dry", f"{env.upper()}: dry run {s['name']} (no deploy)", 300)
+            JOBS[f"dry_{key}_{env}"] = deploy_job(f"{base} dry", f"{env.upper()}: dry run {s['project']} (no deploy)", 300)
             line += f"  /dry_{key}_{env} (dry run)"
         tree_lines.append(line)
 tree_lines += ["", "deploy: skipped when unchanged. redeploy: force it anyway.",
@@ -279,7 +279,7 @@ async def _run(update: Update, name: str) -> None:
 
 
 # ------------------------------------------------------------- auto deploy ----
-_default_auto = ",".join(f"deploy_{s['name'].replace('-', '_')}_{s['env']}" for s in SERVICES if s.get("auto"))
+_default_auto = ",".join(f"deploy_{s['project'].replace('-', '_')}_{s['env']}" for s in SERVICES if s.get("auto"))
 AUTO_JOBS = [
     j for j in (x.strip() for x in os.environ.get("AUTO_DEPLOY", _default_auto).split(","))
     if j

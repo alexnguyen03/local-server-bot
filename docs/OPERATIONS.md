@@ -29,7 +29,7 @@ pip install python-telegram-bot --break-system-packages
 1. Add a block to `ops/structure.json` (see [../ops/structure.json.example](../ops/structure.json.example)).
 2. Run `install.cmd`/`sudo bash ops/install.sh` again: it creates the folder, generates `bot.allow`, and the bot automatically gets the new job.
 3. Fill in the `service.env` stub it just created there (see the warning install.sh prints, or [examples/](../examples)).
-4. Run `install.cmd`/`install.sh` again, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <component> dry"` in a terminal.
+4. Run `install.cmd`/`install.sh` again, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <project> dry"` in a terminal.
 
 ## Letting a coworker issue commands
 

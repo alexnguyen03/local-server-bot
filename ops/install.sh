@@ -45,14 +45,14 @@ echo ">> [4/6] Services: add a service? just add a block to ops/structure.json a
 # Create structure.json from the sample if missing (upsert). If it exists, leave it alone.
 [ -f "$HERE/structure.json" ] || sed 's/\r$//' "$HERE/structure.json.example" > "$HERE/structure.json"
 jq empty "$HERE/structure.json" || { echo "!! ops/structure.json is not valid JSON"; exit 1; }
-jq -e '[.services[] | (.env and .project and .name)] | all' "$HERE/structure.json" >/dev/null \
-  || { echo "!! Every service in ops/structure.json needs env, project, name"; exit 1; }
+jq -e '[.services[] | (.env and .project)] | all' "$HERE/structure.json" >/dev/null \
+  || { echo "!! Every service in ops/structure.json needs env and project"; exit 1; }
 cp "$HERE/structure.json" "$D/structure.json"
 # bot.allow and each service's folder tree are derived from structure.json -> regenerate every run, not hand-edited.
-jq -r '.services[] | "\(.env)/\(.project)/\(.name)"' "$HERE/structure.json" > "$D/bot.allow"
+jq -r '.services[] | "\(.env)/\(.project)"' "$HERE/structure.json" > "$D/bot.allow"
 created_env=""
-while IFS=/ read -r env project name; do
-  dir="$D/$env/$project/$name"
+while IFS=/ read -r env project; do
+  dir="$D/$env/$project"
   mkdir -p "$dir"
   if [ ! -f "$dir/service.env" ]; then
     cat > "$dir/service.env" <<'EOT'

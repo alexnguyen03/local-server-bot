@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy core: mirror GHCR -> CS registry, then redeploy via Dockhand and wait for health.
-# Copied by `deploy` into each component's .run/ and run alongside a .env it builds.
+# Copied by `deploy` into each project's .run/ and run alongside a .env it builds.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

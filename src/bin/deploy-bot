@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # deploy-bot "<message>"   Safe entry point for the Telegram bot. The bot only calls this script,
 # passing the message as ONE argument.
-#   deploy <env> <component> [force] [dry] [<tag>]    e.g.: /deploy uat myservice
-#   status [env]                                      show the running build of each allowed component
+#   deploy <env> <project> [force] [dry] [<tag>]      e.g.: /deploy uat myservice
+#   status [env]                                      show the running build of each allowed project
 #   doctor [env]                                      check service.env: what's missing (required), what's set (optional)
 #   help
-# Only deploys components listed in the allowlist file (default /devops/bot.allow, one <env>/<project>/<component> per line).
+# Only deploys projects listed in the allowlist file (default /devops/bot.allow, one <env>/<project> per line).
 # Anything that doesn't match the syntax is rejected before it ever reaches a shell.
 set -uo pipefail
 
@@ -28,7 +28,7 @@ if [ -r "$ALLOW" ]; then
 fi
 
 help() {
-  say "Commands: /deploy <env> <component> [force] [dry] [tag]   |   /status [env]   |   /doctor [env]"
+  say "Commands: /deploy <env> <project> [force] [dry] [tag]   |   /status [env]   |   /doctor [env]"
   say "Allowed: ${allowed[*]:-(none yet, create $ALLOW)}"
 }
 
@@ -48,7 +48,7 @@ explain() {
     20)  echo "build on LS failed: see the '   |' lines above or the service's build.log"  ;;
     21)  echo "LS is missing a build tool (JDK 21, Docker, git, or skopeo), see the '!!' line above" ;;
     22)  echo "this commit just failed to build, the bot won't retry it immediately (use /redeploy to force a retry now)" ;;
-    64)  echo "bad arguments, or the name matches several places" ;;
+    64)  echo "bad arguments" ;;
     66)  echo "missing folder/service.env, or service.env has no COMPOSE_REPO (and no local compose.yaml); see the 'deploy:' line above" ;;
     75)  echo "this service is already being deployed by another run, wait and try again" ;;
     77)  echo "not in bot.allow" ;;
@@ -66,7 +66,7 @@ case "$cmd" in
   status)
     env_filter="${w[1]:-}"
     [ -z "$env_filter" ] || [[ "$env_filter" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "invalid environment name"
-    [ "${#allowed[@]}" -gt 0 ] || deny "no components in $ALLOW yet" 78
+    [ "${#allowed[@]}" -gt 0 ] || deny "no projects in $ALLOW yet" 78
     for t in "${allowed[@]}"; do
       [ -z "$env_filter" ] || [ "${t%%/*}" = "$env_filter" ] || continue
       d="$ROOT/$t"
@@ -79,15 +79,10 @@ case "$cmd" in
     ;;
 
   deploy)
-    env_name="${w[1]:-}"; comp="${w[2]:-}"
-    [[ "$env_name" =~ ^[a-z0-9][a-z0-9-]*$ && "$comp" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "usage: /deploy <env> <component>"
-    # look up <env>/*/<component>, must be unique
-    cands=()
-    while IFS= read -r p; do [ -f "$p/service.env" ] && cands+=("${p#"$ROOT"/}"); done \
-      < <(find "$ROOT/$env_name" -mindepth 2 -maxdepth 2 -type d -name "$comp" 2>/dev/null | sort)
-    [ "${#cands[@]}" -ge 1 ] || deny "'$comp' not found under '$env_name'" 66
-    [ "${#cands[@]}" -eq 1 ] || deny "'$comp' matches several places: ${cands[*]}" 64
-    target="${cands[0]}"
+    env_name="${w[1]:-}"; proj="${w[2]:-}"
+    [[ "$env_name" =~ ^[a-z0-9][a-z0-9-]*$ && "$proj" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "usage: /deploy <env> <project>"
+    target="$env_name/$proj"
+    [ -f "$ROOT/$target/service.env" ] || deny "'$proj' not found under '$env_name'" 66
     in_allowed "$target" || deny "$target is not allowed to deploy via the bot (add it to $ALLOW)" 77
 
     args=("$target" --brief)
@@ -118,7 +113,7 @@ case "$cmd" in
   doctor)
     env_filter="${w[1]:-}"
     [ -z "$env_filter" ] || [[ "$env_filter" =~ ^[a-z0-9][a-z0-9-]*$ ]] || deny "invalid environment name"
-    [ "${#allowed[@]}" -gt 0 ] || deny "no components in $ALLOW yet" 78
+    [ "${#allowed[@]}" -gt 0 ] || deny "no projects in $ALLOW yet" 78
     bad=0
     for t in "${allowed[@]}"; do
       [ -z "$env_filter" ] || [ "${t%%/*}" = "$env_filter" ] || continue

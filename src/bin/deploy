@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# deploy [<env> <component> | <env>/<project>/<component>] [<tag>] [--force] [--dry-run] [--brief]
+# deploy [<env> <project> | <env>/<project>] [<tag>] [--force] [--dry-run] [--brief]
 #   Short form, works from anywhere:            deploy uat myservice
-#   Run from inside the component's folder:      deploy
+#   Run from inside the project's folder:        deploy
 #   Pin to exactly one build (manual rollback):  deploy uat myservice <sha-xxxxxxx or 40-char commit>
 #   --force    deploy again even if already running that exact build
 #   --dry-run  only print what would be deployed, do nothing
@@ -31,19 +31,11 @@ for a in "$@"; do
   esac
 done
 
-# short form: deploy <env> <component>  ->  look up <env>/*/<component> (must be unique)
-if [ -n "$target" ] && [ "${#words[@]}" -gt 0 ]; then die "pick one form: <env>/<project>/<component> or <env> <component>" 64; fi
+# short form: deploy <env> <project>  ->  same as deploy <env>/<project>, just space-separated
+if [ -n "$target" ] && [ "${#words[@]}" -gt 0 ]; then die "pick one form: <env>/<project> or <env> <project>" 64; fi
 if [ -z "$target" ] && [ "${#words[@]}" -gt 0 ]; then
-  [ "${#words[@]}" = 2 ] || die "usage: deploy <env> <component>   or   deploy <env>/<project>/<component>" 64
-  cands=()
-  while IFS= read -r p; do
-    [ -f "$p/service.env" ] && cands+=("${p#"$ROOT"/}")
-  done < <(find "$ROOT/${words[0]}" -mindepth 2 -maxdepth 2 -type d -name "${words[1]}" 2>/dev/null | sort)
-  case "${#cands[@]}" in
-    0) die "component '${words[1]}' not found under environment '${words[0]}'" 66 ;;
-    1) target="${cands[0]}"; echo "deploy: $target" ;;
-    *) die "name '${words[1]}' matches several places (${cands[*]}); give the full <env>/<project>/<component>" 64 ;;
-  esac
+  [ "${#words[@]}" = 2 ] || die "usage: deploy <env> <project>   or   deploy <env>/<project>" 64
+  target="${words[0]}/${words[1]}"
 fi
 
 # no target given: infer it from the current directory
@@ -55,8 +47,8 @@ if [ -z "$target" ]; then
   echo "deploy: inferred from current directory -> $target"
 fi
 
-re='^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$'
-[[ "$target" =~ $re ]] || die "name must look like <env>/<project>/<component>, lowercase, e.g. uat/myproject/myservice (got: $target)" 64
+re='^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*$'
+[[ "$target" =~ $re ]] || die "name must look like <env>/<project>, lowercase, e.g. uat/myservice (got: $target)" 64
 [ -z "$tag" ] || [[ "$tag" =~ ^(sha-[0-9a-f]{7}|[0-9a-f]{40})$ ]] || die "invalid tag: $tag (needs sha-xxxxxxx or a 40-char commit hash)" 64
 
 env_name="${target%%/*}"
@@ -69,7 +61,7 @@ if grep -n 'CHANGEME' "${files[@]}" 2>/dev/null; then
   die "CHANGEME values still present above, fill them in then run again" 78
 fi
 
-# load config: env-wide common -> component-specific -> secrets
+# load config: env-wide common -> project-specific -> secrets
 sec="$ROOT/$env_name/.secrets"
 layers=("$ROOT/$env_name/common.env" "$dir/service.env")
 if [ -f "$sec" ]; then
@@ -87,7 +79,7 @@ set +a
 : "${DOCKHAND_STACK:?service.env is missing DOCKHAND_STACK}"
 TRACK_TAG="${TRACK_TAG:-latest}"
 
-# one at a time per component: a second concurrent run waits its turn
+# one at a time per project: a second concurrent run waits its turn
 exec 9>"$dir/.lock"
 if ! flock -n 9; then
   echo ">> $target is being deployed by another process (manual or automatic), waiting for a turn..."
@@ -118,7 +110,7 @@ mkdir -p "$run"; chmod 700 "$run"
 
 # Fetch the compose file into .run/compose.yaml (the core reads this file).
 # COMPOSE_REPO set in service.env: fetch compose from GitHub by branch, nothing kept on disk.
-# Not set: use the local compose.yaml in the component's folder (the old way).
+# Not set: use the local compose.yaml in the project's folder (the old way).
 #   COMPOSE_REPO=myorg/myservice       repo that holds the compose file
 #   COMPOSE_PATH=docker-compose.yml    path inside the repo (default docker-compose.yml)
 #   COMPOSE_REF=main                   branch (or tag/commit) to fetch compose from; empty = main
@@ -186,9 +178,9 @@ if [ "$tag" = "$last" ] && [ "$csum" = "$last_compose" ] && [ "$force" = 0 ]; th
 fi
 [ "$tag" = "$last" ] && [ "$csum" != "$last_compose" ] && echo "deploy: image unchanged but compose changed, deploying again"
 
-# Run the deploy core inside the component's .run/, with a .env built from the layers above.
+# Run the deploy core inside the project's .run/, with a .env built from the layers above.
 # The core (deploy-core.sh) stays as-is and still reads its own .env next to it as before;
-# its state file also lives in .run/ so each component keeps its own state.
+# its state file also lives in .run/ so each project keeps its own state.
 cp "$CORE" "$run/deploy.sh"
 ( umask 077; printf '%s\n' "$merged" > "$run/.env" )
 
