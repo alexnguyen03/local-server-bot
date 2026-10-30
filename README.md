@@ -73,6 +73,7 @@ lsb deploy <env> <project> [force] [dry] [tag]   # same as running deploy direct
 lsb status [env]                                 # what's currently deployed
 lsb doctor [env]                                 # what's missing/set in each service.env
 lsb install                                      # re-fetch the latest release and update the code (run from anywhere)
+lsb update                                       # edited structure.json/service.env/.env? re-run init and restart the bot
 ```
 
 Most of this also works as Telegram commands once the bot is running (`/status_uat`, `/doctor_uat`, `/deploy_<project>_<env>`, ...) — see the example below and [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full list, troubleshooting, and adding a coworker.
@@ -201,7 +202,7 @@ src/bin/deploy-core.sh  mirror/verify, update the Dockhand stack, health check, 
 src/bin/deploy-bot      the safe gateway between the bot and deploy (allowlist, syntax checks)
 src/bin/build-local     build on LS (Jib or Docker) and push straight to CS
 src/bin/resolve-tag.sh  find the latest tag on GHCR (flow 1)
-src/bin/lsb             CLI wrapper (install/init/start/stop/deploy/status/doctor), installed onto PATH
+src/bin/lsb             CLI wrapper (install/init/update/start/stop/deploy/status/doctor), installed onto PATH
 examples/               sample config (no real secrets)
 ops/install.sh          install|init|start|stop — the real installer, called by every entry point below
 ops/install-service.sh  systemd unit install, called by 'start'

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# ops/install.sh <install|init|start|stop>   (default: install)
+# ops/install.sh <install|init|update|start|stop>   (default: install)
 #   install  system tools + deploy scripts + bot code/venv. No config, no service running yet.
 #   init     generate ops/structure.json, bot.allow, each service's service.env stub, bot/.env stub
 #            from the samples. Run again any time you add a service to ops/structure.json.
+#   update   same as init, then restarts the bot so edited config (structure.json, service.env, .env)
+#            takes effect immediately. Use this after hand-editing config on an already-running bot.
 #   start    start/enable the systemd service. Needs bot/.env (and each service.env) filled in first.
 #   stop     stop the systemd service.
 # Every subcommand is an upsert: safe to run any number of times, never overwrites existing
@@ -126,10 +128,21 @@ do_stop() {
   echo ">> Stopped. (it will start again on the next reboot unless you also run: systemctl disable deploy-bot)"
 }
 
+do_update() {
+  do_init
+  if systemctl is-active --quiet deploy-bot 2>/dev/null; then
+    systemctl restart deploy-bot
+    echo ">> Config regenerated and deploy-bot restarted."
+  else
+    echo ">> Config regenerated. deploy-bot isn't running yet, run: lsb start"
+  fi
+}
+
 case "$cmd" in
   install) do_install ;;
   init)    do_init ;;
+  update)  do_update ;;
   start)   do_start ;;
   stop)    do_stop ;;
-  *) echo "Usage: $0 <install|init|start|stop>" >&2; exit 64 ;;
+  *) echo "Usage: $0 <install|init|update|start|stop>" >&2; exit 64 ;;
 esac

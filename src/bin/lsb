@@ -3,6 +3,7 @@
 # it's on PATH (ops/install.sh symlinks it into /usr/local/bin).
 #   lsb install                         re-fetch the latest release and install the code (no config/service)
 #   lsb init                            generate structure.json/bot.allow/service.env/.env stubs
+#   lsb update                          re-run init and restart the bot so edited config takes effect
 #   lsb start                           start/enable the systemd service
 #   lsb stop                            stop the systemd service
 #   lsb deploy <env> <project> ...      same as calling deploy directly
@@ -32,7 +33,7 @@ case "$cmd" in
     tar xzf "$tmp/pkg.tar.gz" -C "$SRC"
     exec bash "$SRC/ops/install.sh" install
     ;;
-  init|start|stop) exec bash "$SRC/ops/install.sh" "$cmd" ;;
+  init|update|start|stop) exec bash "$SRC/ops/install.sh" "$cmd" ;;
   deploy)  exec "$ROOT/bin/deploy" "$@" ;;
   status)  exec "$ROOT/bin/deploy-bot" status "$@" ;;
   doctor)  exec "$ROOT/bin/deploy-bot" doctor "$@" ;;

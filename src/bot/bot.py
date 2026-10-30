@@ -353,15 +353,19 @@ async def auto_tick(app: Application, name: str) -> None:
                           f"/auto_off to pause.\n{tail}")
 
 
+async def _auto_tick_safe(app: Application, name: str) -> None:
+    try:
+        await auto_tick(app, name)
+    except Exception:
+        log.exception("AUTO  %s: unexpected error", name)
+
+
 async def auto_loop(app: Application) -> None:
     await asyncio.sleep(30)                 # let the bot finish starting up
     while True:
         if auto_enabled:
-            for name in AUTO_JOBS:
-                try:
-                    await auto_tick(app, name)
-                except Exception:
-                    log.exception("AUTO  %s: unexpected error", name)
+            for name in AUTO_JOBS:          # fire each as its own task: one slow build doesn't delay the rest
+                asyncio.create_task(_auto_tick_safe(app, name))
         await asyncio.sleep(AUTO_INTERVAL)
 
 
@@ -470,9 +474,10 @@ def main() -> None:
         .token(TOKEN)
         .connect_timeout(15).read_timeout(20).write_timeout(20).pool_timeout(15)
         .get_updates_read_timeout(40)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
+        .concurrent_updates(True)   # run each command's handler as its own task: deploys for different
+        .post_init(post_init)       # services (or build + deploy) run in parallel instead of queueing
+        .post_shutdown(post_shutdown)   # behind each other. Per-job asyncio.Lock in _run still serializes
+        .build()                        # repeated calls to the SAME job.
     )
     app.add_handler(MessageHandler(filters.ALL, log_incoming), group=-1)
     app.add_handler(CommandHandler("id", cmd_id))

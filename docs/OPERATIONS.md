@@ -8,6 +8,7 @@ sudo lsb init       # generate structure.json/bot.allow/service.env/.env stubs f
 # ... fill in the stubs it created ...
 sudo lsb start      # installs the systemd service if needed, then starts it
 sudo lsb stop        # stops it
+sudo lsb update      # edited config afterwards (structure.json/service.env/.env)? run init + restart in one step
 ```
 
 Every one of these is safe to run again any number of times (upsert): code is always overwritten with the latest version, but config and secrets you've already filled in (`ops/structure.json`, `bot/.env`, `common.env`, `.secrets`, `service.env`) are never touched. See [../README.md](../README.md) for the full first-run flow. `lsb` isn't on PATH yet before the first `install`; use `sudo bash ops/install.sh <install|init|start|stop>` from a local checkout, or the one-liners in the README.
@@ -30,9 +31,9 @@ pip install python-telegram-bot --break-system-packages
 ## Adding a new service
 
 1. Add a block to `ops/structure.json` (see [../ops/structure.json.example](../ops/structure.json.example)).
-2. Run `sudo lsb init` again: it creates the folder, generates `bot.allow`, and the bot automatically gets the new job next time it (re)starts.
-3. Fill in the `service.env` stub it just created there (see the warning `init` prints, or [examples/](../examples)).
-4. `sudo lsb start` to pick up the new job, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <project> dry"` in a terminal.
+2. Run `sudo lsb init`: it creates the folder, generates `bot.allow`, and the `service.env` stub for it.
+3. Fill in that `service.env` stub (see the warning `init` prints, or [examples/](../examples)).
+4. `sudo lsb update` (init again + restart in one step, if the bot's already running — `sudo lsb start` the first time) to pick up the new job, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <project> dry"` in a terminal.
 
 ## Letting a coworker issue commands
 
