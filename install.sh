@@ -17,7 +17,9 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$URL" -o "$tmp/pkg.tar.gz"
 
 echo ">> Extracting to $DEST"
-rm -rf "$DEST"
+# No rm -rf here: ops/install.conf and ops/structure.json live inside $DEST but are gitignored,
+# so they're never part of the tarball — extracting over the directory updates the code without
+# touching them. Wiping the directory first would destroy any edits made after the first install.
 mkdir -p "$DEST"
 tar xzf "$tmp/pkg.tar.gz" -C "$DEST"
 

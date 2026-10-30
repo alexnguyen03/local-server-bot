@@ -22,7 +22,10 @@ case "$cmd" in
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
     echo ">> Downloading $url"
     curl -fsSL "$url" -o "$tmp/pkg.tar.gz"
-    rm -rf "$SRC"; mkdir -p "$SRC"
+    # No rm -rf: ops/install.conf and ops/structure.json live under $SRC but are gitignored, so
+    # they're never in the tarball — extracting over the directory updates the code without
+    # touching them (see install.sh at the repo root for the same reasoning).
+    mkdir -p "$SRC"
     tar xzf "$tmp/pkg.tar.gz" -C "$SRC"
     exec bash "$SRC/ops/install.sh"
     ;;
