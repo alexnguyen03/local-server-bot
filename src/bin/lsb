@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # lsb <command> [...]   Convenience wrapper around this install's scripts. Usable from anywhere once
 # it's on PATH (ops/install.sh symlinks it into /usr/local/bin).
-#   lsb install                         re-fetch the latest release and re-run the installer
-#   lsb deploy <env> <component> ...    same as calling deploy directly
+#   lsb install                         re-fetch the latest release and install the code (no config/service)
+#   lsb init                            generate structure.json/bot.allow/service.env/.env stubs
+#   lsb start                           start/enable the systemd service
+#   lsb stop                            stop the systemd service
+#   lsb deploy <env> <project> ...      same as calling deploy directly
 #   lsb status [env]                    same as deploy-bot status
 #   lsb doctor [env]                    same as deploy-bot doctor
 #   lsb help
@@ -12,7 +15,7 @@ ROOT="${DEVOPS_ROOT:-/devops}"
 SRC="${LSB_SRC:-/devops/_src}"
 REPO="${LSB_REPO:-alexnguyen03/local-server-bot}"
 
-usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
 
 cmd="${1:-help}"; shift || true
 
@@ -27,8 +30,9 @@ case "$cmd" in
     # touching them (see install.sh at the repo root for the same reasoning).
     mkdir -p "$SRC"
     tar xzf "$tmp/pkg.tar.gz" -C "$SRC"
-    exec bash "$SRC/ops/install.sh"
+    exec bash "$SRC/ops/install.sh" install
     ;;
+  init|start|stop) exec bash "$SRC/ops/install.sh" "$cmd" ;;
   deploy)  exec "$ROOT/bin/deploy" "$@" ;;
   status)  exec "$ROOT/bin/deploy-bot" status "$@" ;;
   doctor)  exec "$ROOT/bin/deploy-bot" doctor "$@" ;;

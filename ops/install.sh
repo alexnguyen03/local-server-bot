@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Upsert: first install or update the deploy scripts and bot on LS (Linux or WSL2). Run as root.
-# Safe to run again any number of times. Never overwrites existing config/secrets
-# (ops/install.conf, ops/structure.json, bot/.env, uat/.secrets, service.env).
-# bot.allow and each service's folder tree are regenerated every run from ops/structure.json (not hand-edited).
-# Exit code 10: just enabled systemd for WSL, needs 'wsl --shutdown' then a retry.
+# ops/install.sh <install|init|start|stop>   (default: install)
+#   install  system tools + deploy scripts + bot code/venv. No config, no service running yet.
+#   init     generate ops/structure.json, bot.allow, each service's service.env stub, bot/.env stub
+#            from the samples. Run again any time you add a service to ops/structure.json.
+#   start    start/enable the systemd service. Needs bot/.env (and each service.env) filled in first.
+#   stop     stop the systemd service.
+# Every subcommand is an upsert: safe to run any number of times, never overwrites existing
+# config/secrets (ops/install.conf, ops/structure.json, bot/.env, uat/.secrets, service.env).
+# Exit code 10 from 'start': just enabled systemd for WSL, run 'wsl --shutdown' then 'start' again.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "$HERE/../src" && pwd)"
@@ -13,49 +17,55 @@ EX="$(cd "$HERE/../examples" && pwd)"
 [ -f "$HERE/install.conf" ] || sed 's/\r$//' "$HERE/install.conf.example" > "$HERE/install.conf"
 . "$HERE/install.conf"
 D="${DEVOPS_ROOT:-/devops}"
+cmd="${1:-install}"
 
-[ "$(id -u)" = 0 ] || { echo "Must run as root (sudo bash ops/install.sh)"; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "Must run as root (sudo bash ops/install.sh $cmd)"; exit 1; }
 
-echo ">> [1/6] System tools"
-missing=0
-for c in git skopeo jq python3; do command -v "$c" >/dev/null || missing=1; done
-python3 -c 'import venv, ensurepip' 2>/dev/null || missing=1
-if [ "$missing" = 1 ]; then
-  apt-get update -qq
-  apt-get install -y git skopeo jq python3 python3-venv ca-certificates
-fi
-echo "   (JDK 21 for Jib and docker.io for Dockerfile builds: install only when a service needs it, see docs/OPERATIONS.md)"
+do_install() {
+  echo ">> [1/3] System tools"
+  missing=0
+  for c in git skopeo jq python3; do command -v "$c" >/dev/null || missing=1; done
+  python3 -c 'import venv, ensurepip' 2>/dev/null || missing=1
+  if [ "$missing" = 1 ]; then
+    apt-get update -qq
+    apt-get install -y git skopeo jq python3 python3-venv ca-certificates
+  fi
+  echo "   (JDK 21 for Jib and docker.io for Dockerfile builds: install only when a service needs it, see docs/OPERATIONS.md)"
 
-echo ">> [2/6] Deploy scripts -> $D/bin"
-mkdir -p "$D/bin" "$D/bot" "$D/uat"
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-for f in build-local deploy deploy-bot deploy-core.sh resolve-tag.sh lsb; do
-  sed 's/\r$//' "$SRC/bin/$f" > "$tmp"
-  bash -n "$tmp" || { echo "!! Syntax error: $f"; exit 1; }
-  install -m 755 "$tmp" "$D/bin/$f"
-done
-ln -sf "$D/bin/lsb" /usr/local/bin/lsb 2>/dev/null || echo "   (couldn't symlink lsb into /usr/local/bin, run it as $D/bin/lsb instead)"
+  echo ">> [2/3] Deploy scripts -> $D/bin"
+  mkdir -p "$D/bin" "$D/bot" "$D/uat"
+  tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+  for f in build-local deploy deploy-bot deploy-core.sh resolve-tag.sh lsb; do
+    sed 's/\r$//' "$SRC/bin/$f" > "$tmp"
+    bash -n "$tmp" || { echo "!! Syntax error: $f"; exit 1; }
+    install -m 755 "$tmp" "$D/bin/$f"
+  done
+  ln -sf "$D/bin/lsb" /usr/local/bin/lsb 2>/dev/null || echo "   (couldn't symlink lsb into /usr/local/bin, run it as $D/bin/lsb instead)"
 
-echo ">> [3/6] Bot -> $D/bot"
-sed 's/\r$//' "$SRC/bot/bot.py" > "$D/bot/bot.py"
-[ -d "$D/bot/.venv" ] || python3 -m venv "$D/bot/.venv"
-"$D/bot/.venv/bin/pip" install -q --upgrade python-telegram-bot
+  echo ">> [3/3] Bot -> $D/bot"
+  sed 's/\r$//' "$SRC/bot/bot.py" > "$D/bot/bot.py"
+  [ -d "$D/bot/.venv" ] || python3 -m venv "$D/bot/.venv"
+  "$D/bot/.venv/bin/pip" install -q --upgrade python-telegram-bot
 
-echo ">> [4/6] Services: add a service? just add a block to ops/structure.json and re-run this step"
-# Create structure.json from the sample if missing (upsert). If it exists, leave it alone.
-[ -f "$HERE/structure.json" ] || sed 's/\r$//' "$HERE/structure.json.example" > "$HERE/structure.json"
-jq empty "$HERE/structure.json" || { echo "!! ops/structure.json is not valid JSON"; exit 1; }
-jq -e '[.services[] | (.env and .project)] | all' "$HERE/structure.json" >/dev/null \
-  || { echo "!! Every service in ops/structure.json needs env and project"; exit 1; }
-cp "$HERE/structure.json" "$D/structure.json"
-# bot.allow and each service's folder tree are derived from structure.json -> regenerate every run, not hand-edited.
-jq -r '.services[] | "\(.env)/\(.project)"' "$HERE/structure.json" > "$D/bot.allow"
-created_env=""
-while IFS=/ read -r env project; do
-  dir="$D/$env/$project"
-  mkdir -p "$dir"
-  if [ ! -f "$dir/service.env" ]; then
-    cat > "$dir/service.env" <<'EOT'
+  echo ">> Install done. Next: lsb init   (or: bash $HERE/install.sh init)"
+}
+
+do_init() {
+  echo ">> Services: add a block to ops/structure.json, then run 'init' again to pick it up"
+  # Create structure.json from the sample if missing (upsert). If it exists, leave it alone.
+  [ -f "$HERE/structure.json" ] || sed 's/\r$//' "$HERE/structure.json.example" > "$HERE/structure.json"
+  jq empty "$HERE/structure.json" || { echo "!! ops/structure.json is not valid JSON"; exit 1; }
+  jq -e '[.services[] | (.env and .project)] | all' "$HERE/structure.json" >/dev/null \
+    || { echo "!! Every service in ops/structure.json needs env and project"; exit 1; }
+  cp "$HERE/structure.json" "$D/structure.json"
+  # bot.allow and each service's folder tree are derived from structure.json -> regenerate every run, not hand-edited.
+  jq -r '.services[] | "\(.env)/\(.project)"' "$HERE/structure.json" > "$D/bot.allow"
+  created_env=""
+  while IFS=/ read -r env project; do
+    dir="$D/$env/$project"
+    mkdir -p "$dir"
+    if [ ! -f "$dir/service.env" ]; then
+      cat > "$dir/service.env" <<'EOT'
 # ---- required: fill these in, then run /doctor_<env> (or "deploy-bot doctor") to check again ----
 GH_REPO=CHANGEME          # <owner>/<image-repo> on GitHub, e.g. myorg/myservice
 APP=CHANGEME              # image name on the CS registry
@@ -73,24 +83,41 @@ COMPOSE_REF=main
 #BUILD_BRANCH=main
 #BUILD_TYPE=docker        # docker | jib
 EOT
-    chmod 644 "$dir/service.env"
-    created_env="$created_env\n  $dir/service.env"
+      chmod 644 "$dir/service.env"
+      created_env="$created_env\n  $dir/service.env"
+    fi
+  done < "$D/bot.allow"
+  [ -z "$created_env" ] || echo -e "!! Created new service.env file(s); fill in the required fields:$created_env"
+
+  echo ">> Bot config"
+  if [ ! -f "$D/bot/.env" ]; then
+    sed 's/\r$//' "$EX/bot.env.example" > "$D/bot/.env"
+    chmod 600 "$D/bot/.env"
+    echo "!! Created $D/bot/.env from the sample. Fill in BOT_TOKEN, ALLOWED_CHAT_ID, ALLOWED_USER_IDS."
+    echo "   For the other files (common.env, .secrets) see examples/ and docs/OPERATIONS.md."
   fi
-done < "$D/bot.allow"
-[ -z "$created_env" ] || echo -e "!! Created new service.env file(s); fill in the required fields then run again (see docs/OPERATIONS.md):$created_env"
+  grep -q '^DEVOPS_ROOT=' "$D/bot/.env" || echo "DEVOPS_ROOT=$D" >> "$D/bot/.env"   # upsert: add if missing, leave other lines alone
 
-echo ">> [5/6] Configuration"
-if [ ! -f "$D/bot/.env" ]; then
-  sed 's/\r$//' "$EX/bot.env.example" > "$D/bot/.env"
-  chmod 600 "$D/bot/.env"
-  echo "!! Created $D/bot/.env from the sample. Fill in BOT_TOKEN, ALLOWED_CHAT_ID, ALLOWED_USER_IDS, then run this again."
-  echo "   For the other files (common.env, .secrets, service.env) see examples/ and docs/OPERATIONS.md."
-  exit 0
-fi
-grep -q '^DEVOPS_ROOT=' "$D/bot/.env" || echo "DEVOPS_ROOT=$D" >> "$D/bot/.env"   # upsert: add if missing, leave other lines alone
+  echo ">> Init done. Fill in the service.env/.env files above, then run: lsb start"
+}
 
-echo ">> [6/6] Bot service"
-rc=0; DEVOPS_ROOT="$D" bash "$HERE/install-service.sh" || rc=$?
-[ "$rc" = 0 ] || exit "$rc"
-systemctl restart deploy-bot
-echo ">> Done. Type /ping in the Telegram group to check."
+do_start() {
+  [ -f "$D/bot/.env" ] || { echo "!! $D/bot/.env not found, run 'lsb init' first"; exit 1; }
+  grep -q '^BOT_TOKEN=.' "$D/bot/.env" || echo "   (warning: BOT_TOKEN looks empty in $D/bot/.env — the bot won't be able to log in)"
+  DEVOPS_ROOT="$D" bash "$HERE/install-service.sh"
+  systemctl restart deploy-bot
+  echo ">> Started. Type /ping in the Telegram group to check."
+}
+
+do_stop() {
+  systemctl stop deploy-bot
+  echo ">> Stopped. (it will start again on the next reboot unless you also run: systemctl disable deploy-bot)"
+}
+
+case "$cmd" in
+  install) do_install ;;
+  init)    do_init ;;
+  start)   do_start ;;
+  stop)    do_stop ;;
+  *) echo "Usage: $0 <install|init|start|stop>" >&2; exit 64 ;;
+esac

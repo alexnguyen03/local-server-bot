@@ -1,13 +1,16 @@
 # Operations
 
-## Install or update on LS
+## Install, set up, start/stop
 
 ```bash
-sudo bash ops/install.sh        # Linux
-install.cmd                     # Windows, runs it inside WSL
+sudo lsb install   # code + dependencies only (no config, nothing running)
+sudo lsb init       # generate structure.json/bot.allow/service.env/.env stubs from the samples
+# ... fill in the stubs it created ...
+sudo lsb start      # installs the systemd service if needed, then starts it
+sudo lsb stop        # stops it
 ```
 
-Safe to run again any number of times (upsert): code is always overwritten with the latest version, but config and secrets you've already filled in (`ops/structure.json`, `bot/.env`, `common.env`, `.secrets`, `service.env`) are never touched. See [../README.md](../README.md#quickstart) for the full first-run flow.
+Every one of these is safe to run again any number of times (upsert): code is always overwritten with the latest version, but config and secrets you've already filled in (`ops/structure.json`, `bot/.env`, `common.env`, `.secrets`, `service.env`) are never touched. See [../README.md](../README.md) for the full first-run flow. `lsb` isn't on PATH yet before the first `install`; use `sudo bash ops/install.sh <install|init|start|stop>` from a local checkout, or the one-liners in the README.
 
 ## Restarting itself after a crash or reboot
 
@@ -27,9 +30,9 @@ pip install python-telegram-bot --break-system-packages
 ## Adding a new service
 
 1. Add a block to `ops/structure.json` (see [../ops/structure.json.example](../ops/structure.json.example)).
-2. Run `install.cmd`/`sudo bash ops/install.sh` again: it creates the folder, generates `bot.allow`, and the bot automatically gets the new job.
-3. Fill in the `service.env` stub it just created there (see the warning install.sh prints, or [examples/](../examples)).
-4. Run `install.cmd`/`install.sh` again, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <project> dry"` in a terminal.
+2. Run `sudo lsb init` again: it creates the folder, generates `bot.allow`, and the bot automatically gets the new job next time it (re)starts.
+3. Fill in the `service.env` stub it just created there (see the warning `init` prints, or [examples/](../examples)).
+4. `sudo lsb start` to pick up the new job, then try `/doctor_<env>` in Telegram or `deploy-bot "deploy uat <project> dry"` in a terminal.
 
 ## Letting a coworker issue commands
 

@@ -13,8 +13,8 @@ if [ "$(ps -p 1 -o comm=)" != "systemd" ]; then
     echo "wsl.conf already has a [boot] section, add systemd=true to it yourself:"; cat /etc/wsl.conf; exit 1
   fi
   printf '[boot]\nsystemd=true\n' >> /etc/wsl.conf
-  echo ">> Enabled systemd for WSL. Needs 'wsl --shutdown' then a retry (install.cmd does this automatically)."
-  exit 10   # exit code 10: the Windows wrapper reads this as "shut down WSL, then retry"
+  echo ">> Enabled systemd for WSL. From PowerShell: wsl --shutdown, reopen WSL, then run 'lsb start' again."
+  exit 10
 fi
 
 D="${DEVOPS_ROOT:-/devops}"

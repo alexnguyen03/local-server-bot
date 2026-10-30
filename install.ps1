@@ -1,7 +1,9 @@
 # One-line Windows installer: irm https://raw.githubusercontent.com/alexnguyen03/local-server-bot/main/install.ps1 | iex
-# No git clone needed. Makes sure WSL is available, then runs the same Linux one-liner (install.sh)
-# inside it. Piped through iex, so this file must work with no local path of its own ($PSScriptRoot
-# does not exist here) and takes overrides through env vars instead of parameters:
+# No git clone needed. Makes sure WSL is available, then runs the Linux installer (install.sh) inside
+# it. This only installs the code/dependencies — it does not generate config or start the bot. From
+# a WSL shell afterwards: lsb init, fill in the config, then lsb start.
+# Piped through iex, so this file must work with no local path of its own ($PSScriptRoot does not
+# exist here) and takes overrides through env vars instead of parameters:
 #   $env:LSB_REPO          GitHub "owner/repo" to install from (default: alexnguyen03/local-server-bot)
 #   $env:LSB_DISTRO        WSL distro name to use (default: WSL's own default distro)
 #   $env:LSB_NO_KEEPALIVE  set to "1" to skip the Scheduled Task that keeps WSL alive after reboot
@@ -17,18 +19,11 @@ if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
 
 $dArgs = @(); if ($Distro) { $dArgs = @("-d", $Distro) }
 
-function Invoke-Install {
-  & wsl.exe @dArgs -u root -- bash -c "curl -fsSL '$LinuxUrl' | bash"
-  return $LASTEXITCODE
-}
-
-$rc = Invoke-Install
-if ($rc -eq 10) {
-  Write-Host ">> Just enabled systemd for WSL. Running wsl --shutdown, then retrying..."
-  & wsl.exe --shutdown
-  Start-Sleep -Seconds 3
-  $rc = Invoke-Install
-}
+# Pipe wsl.exe's own output to Out-Host: it still prints live, but none of those lines leak into
+# this script's own return value (a native command's stdout otherwise becomes pipeline output too,
+# which would corrupt $rc below into an array instead of a plain exit code).
+& wsl.exe @dArgs -u root -- bash -c "curl -fsSL '$LinuxUrl' | bash" | Out-Host
+$rc = $LASTEXITCODE
 if ($rc -ne 0) { throw "install failed (code $rc). See the log above." }
 
 if ($env:LSB_NO_KEEPALIVE -ne "1") {
@@ -46,3 +41,5 @@ if ($env:LSB_NO_KEEPALIVE -ne "1") {
     Write-Warning "Did not create the Scheduled Task that keeps WSL alive after reboot (needs Administrator). Re-run as Administrator, or set `$env:LSB_NO_KEEPALIVE='1'` to skip it."
   }
 }
+
+Write-Host ">> Install done. Next, from a WSL shell: lsb init"
