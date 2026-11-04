@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import time
@@ -188,6 +189,173 @@ async def run_job(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _run(update, name)
 
 
+def _fmt_dur(sec: int) -> str:
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        m, s = divmod(sec, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if m and s:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{h}h {m}m"
+    return f"{h}h"
+
+
+def format_deploy_result(name: str, rc: int, text: str) -> str:
+    """Format deploy/redeploy/dry output into a concise summary message."""
+    if not name.startswith(("deploy_", "redeploy_", "dry_")):
+        return text[-MAX_OUTPUT_CHARS:] or "(no output)"
+
+    target = ""
+    mode = ""
+    app = ""
+    tag = ""
+    running = ""
+    build_from = build_to = ""
+    build_dur = 0
+    build_skipped = False
+    mirror_from = mirror_to = ""
+    mirror_dur = 0
+    mirror_skipped = False
+    deleted_tags: list[str] = []
+    reason = ""
+    log_path = ""
+    rolled_back = ""
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("Starting: "):
+            target = s.split("Starting: ", 1)[1].strip()
+        elif s.startswith("deploy: mode="):
+            m = re.match(r"deploy: mode=(.+?)\s+app=(\S+)(?:\s+running=(\S+))?", s)
+            if m:
+                mode, app = m.group(1), m.group(2)
+                if m.group(3):
+                    running = m.group(3)
+        elif s.startswith("deploy: build_time"):
+            m = re.match(r"deploy: build_time\s+from=(.+?)\s+to=(.+?)\s+dur=(\d+)s", s)
+            if m:
+                build_from, build_to, build_dur = m.group(1), m.group(2), int(m.group(3))
+        elif "is already on CS" in s and "skipping the build" in s:
+            build_skipped = True
+        elif s.startswith(">> build:") and "->" in s:
+            mode = mode or "LOCAL BUILD"
+            m = re.search(r"->\s*[^/\s]+/([^:\s]+):(sha-[0-9a-f]+|[0-9a-f]{40})", s)
+            if m:
+                app = app or m.group(1)
+                tag = tag or m.group(2)
+        elif re.match(r"^deploy:\s+\S+\s+tag=\S+\s+\(currently running:", s):
+            m = re.match(r"^deploy:\s+(\S+)\s+tag=(\S+)\s+\(currently running:\s*([^)]+)\)", s)
+            if m:
+                target, tag, running = m.group(1), m.group(2), m.group(3)
+        elif s.startswith(">> mirror done in "):
+            m = re.match(r">> mirror done in (\d+)s \[(.+?) -> (.+?)\]", s)
+            if m:
+                mirror_dur, mirror_from, mirror_to = int(m.group(1)), m.group(2), m.group(3)
+        elif s.startswith(">> mirror: CS already has this exact image"):
+            mirror_skipped = True
+            m = re.search(r"\((\d+)s\)\s*\[(.+?) -> (.+?)\]", s)
+            if m:
+                mirror_dur, mirror_from, mirror_to = int(m.group(1)), m.group(2), m.group(3)
+        elif s.startswith(">> cleanup: deleted "):
+            deleted_tags.append(s.split(">> cleanup: deleted ", 1)[1].strip())
+        elif s.startswith(">> rolled back to "):
+            rolled_back = s.split(">> rolled back to ", 1)[1].strip()
+        elif s.startswith("RESULT: FAILED"):
+            m = re.match(r"RESULT: FAILED \(rc=\d+\):\s*(.*)", s)
+            if m and m.group(1):
+                reason = m.group(1).strip()
+        elif s.startswith("Details: "):
+            log_path = s.split("Details: ", 1)[1].strip()
+        elif "Full log: " in s:
+            log_path = s.split("Full log: ", 1)[1].strip()
+        elif "Log: " in s and "/build.log" in s:
+            log_path = s.split("Log: ", 1)[1].strip()
+        elif "See " in s and "/build.log" in s:
+            log_path = s.split("See ", 1)[1].strip()
+
+    if not mode and target:
+        env_file = Path(DEVOPS_ROOT) / target / "service.env"
+        if env_file.is_file():
+            try:
+                raw_env = env_file.read_text(encoding="utf-8", errors="replace")
+                if re.search(r"^BUILD_MODE\s*=\s*local\b", raw_env, re.M):
+                    mode = "LOCAL BUILD"
+                if not app:
+                    m_app = re.search(r"^APP\s*=\s*(\S+)", raw_env, re.M)
+                    if m_app:
+                        app = m_app.group(1)
+            except Exception:
+                pass
+    mode = mode or "GHCR MIRROR"
+    app_label = f"{app}:{tag}" if (app and tag) else (app or tag or target)
+
+    if rc == 0 and "use --force" in text:
+        out = [
+            "RESULT: SKIPPED ⏭",
+            f"Type: {mode}",
+            f"🚀 Deploy {target}  tag={tag}  (currently running: {running or 'unchanged'})",
+        ]
+        if name in FORCE_HINT:
+            out.append(f"💡 Force: /{FORCE_HINT[name]}")
+        return "\n".join(out)
+
+    if rc == 0 and "--dry-run, stopping here" in text:
+        return "\n".join([
+            "RESULT: DRY RUN ✔",
+            f"Type: {mode}",
+            f"🚀 Deploy {target}  tag={tag}  (currently running: {running or 'unknown'})",
+        ])
+
+    if rc == 0:
+        out = [
+            "RESULT: OK ✔",
+            f"Type: {mode}",
+        ]
+        if mode == "LOCAL BUILD":
+            if build_skipped:
+                out.append(f'🛠  Build "{app_label}" : skipped (already on CS)')
+            elif build_from and build_to:
+                out.append(f'🛠  Build "{app_label}" : from {build_from} to {build_to}, take : {_fmt_dur(build_dur)}')
+        else:
+            if mirror_skipped:
+                out.append(f'📦 Mirror "{app_label}" : skipped (already on CS)')
+            elif mirror_from and mirror_to:
+                out.append(f'📦 Mirror "{app_label}" : from {mirror_from} to {mirror_to}, take : {_fmt_dur(mirror_dur)}')
+        out.append(f"🚀 Deploy {target}  tag={tag}  (currently running: {running or 'unknown'})")
+        if deleted_tags:
+            out.append(f"🧹 Cleanup: deleted {', '.join(deleted_tags)}")
+        else:
+            out.append("🧹 Cleanup: none")
+        return "\n".join(out)
+
+    # Failure case
+    if not log_path and target:
+        if rc in (20, 21, 22) or "build on LS failed" in text:
+            log_path = f"{DEVOPS_ROOT}/{target}/build.log"
+        else:
+            log_path = f"{DEVOPS_ROOT}/{target}/deploy.log"
+
+    out = [
+        f"RESULT: FAILED (rc={rc}) ❌",
+        f"Type: {mode}",
+    ]
+    if tag:
+        out.append(f"🚀 Deploy {target}  tag={tag}  (currently running: {running or 'unknown'})")
+    elif target:
+        out.append(f"🚀 Deploy {target}")
+    if reason:
+        out.append(f"⚠️ Reason: {reason}")
+    if rolled_back:
+        out.append(f"🔄 Rolled back to: {rolled_back}")
+    if log_path:
+        out.append(f"📄 Log: {log_path}")
+    return "\n".join(out)
+
+
 async def _run(update: Update, name: str) -> None:
     msg = update.effective_message
     job = JOBS.get(name)
@@ -207,7 +375,6 @@ async def _run(update: Update, name: str) -> None:
 
     async with lock:
         log.info("START /%s -> %s (cwd=%s, by %s)", name, " ".join(cmd), cwd, who(update))
-        await msg.reply_text(f"Running {name}...")
         t0 = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -220,14 +387,14 @@ async def _run(update: Update, name: str) -> None:
         except FileNotFoundError:
             missing = cwd if not os.path.isdir(cwd) else cmd[0]
             log.error("FAIL  /%s: %s not found", name, missing)
-            await msg.reply_text(f"{name} failed: {missing} not found")
+            await msg.reply_text(f"RESULT: FAILED ❌\n⚠️ {missing} not found")
             return
         except PermissionError:
             log.error("FAIL  /%s: no permission to enter %s or run %s", name, cwd, cmd[0])
-            await msg.reply_text(f"{name} failed: permission denied.")
+            await msg.reply_text("RESULT: FAILED ❌\n⚠️ permission denied")
             return
 
-        # Read output line by line: log it as it arrives, and report progress to the chat every 60s
+        # Read output line by line and log it to bot.log as it arrives (no intermediate chat messages)
         lines: list[str] = []
 
         async def pump() -> None:
@@ -242,10 +409,6 @@ async def _run(update: Update, name: str) -> None:
                 await asyncio.sleep(60)
                 last = lines[-1] if lines else "(no output yet)"
                 log.info("WAIT  /%s has run for %.0fs, last line: %s", name, time.monotonic() - t0, last)
-                try:
-                    await msg.reply_text(f"{name} is still running ({time.monotonic() - t0:.0f}s)\n> {last[:300]}")
-                except Exception as e:  # a failed progress message must not break the job
-                    log.warning("WAIT  could not send progress: %s", e)
 
         hb = asyncio.create_task(heartbeat())
         try:
@@ -257,7 +420,7 @@ async def _run(update: Update, name: str) -> None:
                 pass
             await proc.wait()
             log.error("FAIL  /%s exceeded %ss, stopped", name, timeout)
-            await msg.reply_text(f"{name} exceeded {timeout}s, stopped.")
+            await msg.reply_text(f"RESULT: FAILED (rc=124) ❌\n⚠️ {name} exceeded {timeout}s, stopped.")
             return
         finally:
             hb.cancel()
@@ -268,13 +431,11 @@ async def _run(update: Update, name: str) -> None:
         log.log(level, "END   /%s exit=%s in %.1fs, output %d chars",
                 name, proc.returncode, dur, len(text))
 
-        hint = ""
-        if proc.returncode == 0 and "use --force" in text and name in FORCE_HINT:
-            hint = f"\n\nNothing changed. To run it anyway: /{FORCE_HINT[name]}"
-        await msg.reply_text(
-            f"{name} finished (exit {proc.returncode}, {dur:.1f}s)\n"
-            f"{text[-MAX_OUTPUT_CHARS:] or '(no output)'}{hint}"
-        )
+        if name.startswith(("deploy_", "redeploy_", "dry_")):
+            reply = format_deploy_result(name, proc.returncode, text)
+        else:
+            reply = text[-MAX_OUTPUT_CHARS:] or "(no output)"
+        await msg.reply_text(reply)
         log.info("DONE  /%s sent the result back to the chat", name)
 
 
@@ -329,7 +490,6 @@ async def auto_tick(app: Application, name: str) -> None:
         return
     async with lock:
         rc, text = await capture(JOBS[name])
-    tail = text[-MAX_AUTO_CHARS:]
     if rc == 0:
         if st["notified"]:
             await notify(app, f"AUTO {name}: no longer failing.")
@@ -337,7 +497,7 @@ async def auto_tick(app: Application, name: str) -> None:
         if "use --force" in text:          # image and compose unchanged: stay quiet
             return
         log.info("AUTO  %s deployed", name)
-        await notify(app, f"AUTO {name}: deployed a new build\n{tail}")
+        await notify(app, format_deploy_result(name, rc, text))
         return
     lines = [l for l in text.splitlines() if l.strip()]
     sig = f"{rc}:{lines[-1] if lines else ''}"
@@ -349,8 +509,7 @@ async def auto_tick(app: Application, name: str) -> None:
     log.error("AUTO  %s failed rc=%s (%s time(s) in a row): %s", name, rc, st["fails"], sig[:200])
     if st["fails"] >= 2 and not st["notified"]:     # a transient failure (network, tag not propagated yet) shouldn't be noisy
         st["notified"] = True
-        await notify(app, f"AUTO {name}: REPEATED FAILURE (rc={rc}). The bot will stay quiet until this clears up or changes. "
-                          f"/auto_off to pause.\n{tail}")
+        await notify(app, f"{format_deploy_result(name, rc, text)}\n(AUTO repeated failure — /auto_off to pause)")
 
 
 async def _auto_tick_safe(app: Application, name: str) -> None:

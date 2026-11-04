@@ -42,19 +42,19 @@ OPTIONAL_KEYS=(HEALTH_URL TRACK_TAG BUILD_MODE BUILD_BRANCH BUILD_TYPE BUILD_REP
 # explain an exit code so the reader knows what went wrong without looking it up
 explain() {
   case "$1" in
-    2)   echo "could not resolve the latest tag (resolve-tag failed: GHCR_PAT wrong/expired, or the tracked tag (TRACK_TAG) doesn't exist on GHCR)" ;;
-    10)  echo "could not fetch compose from GitHub (token missing Contents:read, or wrong COMPOSE_REPO/COMPOSE_PATH/ref)" ;;
-    11)  echo "the fetched compose file is invalid (missing 'services:', or not exactly one image: line)" ;;
-    20)  echo "build on LS failed: see the '   |' lines above or the service's build.log"  ;;
-    21)  echo "LS is missing a build tool (JDK 21, Docker, git, or skopeo), see the '!!' line above" ;;
-    22)  echo "this commit just failed to build, the bot won't retry it immediately (use /redeploy to force a retry now)" ;;
+    2)   echo "could not resolve the latest tag on GHCR (check GHCR_PAT or TRACK_TAG)" ;;
+    10)  echo "could not fetch source/compose from GitHub (check token or repo/branch/path)" ;;
+    11)  echo "invalid compose file (missing 'services:', or not exactly one image: line)" ;;
+    20)  echo "build on LS failed" ;;
+    21)  echo "LS is missing a required build tool (JDK 21, Docker, git, or skopeo)" ;;
+    22)  echo "this commit just failed to build recently (use /redeploy to force a retry now)" ;;
     64)  echo "bad arguments" ;;
-    66)  echo "missing folder/service.env, or service.env has no COMPOSE_REPO (and no local compose.yaml); see the 'deploy:' line above" ;;
+    66)  echo "missing folder/service.env or compose.yaml" ;;
     75)  echo "this service is already being deployed by another run, wait and try again" ;;
     77)  echo "not in bot.allow" ;;
-    78)  echo "service.env/common.env still has a CHANGEME value, fill it in and run again" ;;
+    78)  echo "service.env/common.env still has a CHANGEME or missing value" ;;
     124) echo "exceeded the allowed time" ;;
-    *)   echo "error during mirror/redeploy, see the '!!' lines above" ;;
+    *)   echo "error during mirror/redeploy or health check" ;;
   esac
 }
 
@@ -70,10 +70,14 @@ case "$cmd" in
     for t in "${allowed[@]}"; do
       [ -z "$env_filter" ] || [ "${t%%/*}" = "$env_filter" ] || continue
       d="$ROOT/$t"
+      state=""
+      if [ -f "$d/.lock" ] && ! flock -n "$d/.lock" true 2>/dev/null; then
+        state=" [DEPLOYING...]"
+      fi
       if [ -f "$d/last-deployed" ]; then
-        printf '%-28s %-14s %s\n' "$t" "$(cut -c1-12 "$d/last-deployed")" "$(date -r "$d/last-deployed" '+%Y-%m-%d %H:%M')"
+        printf '%-28s %-14s %s%s\n' "$t" "$(cut -c1-12 "$d/last-deployed")" "$(date -r "$d/last-deployed" '+%Y-%m-%d %H:%M')" "$state"
       else
-        printf '%-28s %s\n' "$t" "(never deployed)"
+        printf '%-28s %s%s\n' "$t" "(never deployed)" "$state"
       fi
     done
     ;;

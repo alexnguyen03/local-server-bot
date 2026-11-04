@@ -91,13 +91,26 @@ flock -w "${LOCK_WAIT:-900}" 9 || die "$target is being deployed by another proc
 # BUILD_MODE=local (service.env): build the image on LS from the GitHub source and push it straight
 # to the CS registry, no GHCR/GitHub Actions. Default (ghcr): pull the latest build from GHCR and mirror it to CS.
 BUILD_MODE="${BUILD_MODE:-ghcr}"
+last="$(cat "$dir/last-deployed" 2>/dev/null || true)"
+last_compose="$(cat "$dir/last-compose" 2>/dev/null || true)"
+if [ "$BUILD_MODE" = local ]; then
+  echo "deploy: mode=LOCAL BUILD  app=$APP  running=${last:-unknown}"
+else
+  echo "deploy: mode=GHCR MIRROR  app=$APP  running=${last:-unknown}"
+fi
+
+build_start="" build_end="" build_dur=""
 if [ "$BUILD_MODE" = local ]; then
   export SERVICE_DIR="$dir" SERVICE_TARGET="$target" FORCE="$force"
   if [ -z "$tag" ]; then
     if [ "$dry" = 1 ]; then
       tag="$(bash "$BUILD_LOCAL" --resolve)" || { rc=$?; die "could not resolve the latest commit on branch $BUILD_BRANCH" "$rc"; }
     else
+      _bt0=$SECONDS
+      build_start="$(date '+%Y.%m.%d %H:%M:%S')"
       tag="$(bash "$BUILD_LOCAL")" || { rc=$?; die "build on LS failed (rc=$rc), see the '!!' lines above" "$rc"; }
+      build_end="$(date '+%Y.%m.%d %H:%M:%S')"
+      build_dur=$((SECONDS - _bt0))
     fi
   fi
   export SKIP_MIRROR=1      # image is already on CS, the core just checks the tag is there
@@ -167,8 +180,7 @@ if grep -qE '^[[:space:]]*pull_policy:[[:space:]]*never[[:space:]]*(#.*)?$' "$ru
 fi
 csum="$(sha256sum "$run/compose.yaml" | cut -c1-64)"
 
-last="$(cat "$dir/last-deployed" 2>/dev/null || true)"
-last_compose="$(cat "$dir/last-compose" 2>/dev/null || true)"
+[ -n "$build_start" ] && echo "deploy: build_time  from=$build_start  to=$build_end  dur=${build_dur}s"
 echo "deploy: $target  tag=$tag  (currently running: ${last:-unknown})"
 echo "deploy: compose = $compose_info  [sha256 ${csum:0:12}]"
 

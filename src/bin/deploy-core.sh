@@ -43,6 +43,8 @@ src_size() {
 }
 
 mirror() {
+  local m_start m_end
+  m_start="$(date '+%Y.%m.%d %H:%M:%S')"
   if [ "${SKIP_MIRROR:-0}" = 1 ]; then
     skopeo inspect "${DST_CREDS[@]}" --format '{{.Digest}}' "docker://$CS_REGISTRY/$APP:$1" >/dev/null 2>&1 \
       || { echo "!! $APP:$1 is not on the CS registry (not built on LS yet, or already pruned past the 2 kept builds)" >&2; return 1; }
@@ -57,7 +59,8 @@ mirror() {
   if [ -n "$dd" ]; then echo ">> GHCR digest ${sd:7:12}; on CS: ${dd:7:12}"
   else echo ">> GHCR digest ${sd:7:12}; on CS: this tag doesn't exist yet"; fi
   if [ -n "$dd" ] && [ "$sd" = "$dd" ]; then
-    echo ">> mirror: CS already has this exact image, skipping the copy ($((SECONDS - t))s)"
+    m_end="$(date '+%Y.%m.%d %H:%M:%S')"
+    echo ">> mirror: CS already has this exact image, skipping the copy ($((SECONDS - t))s) [$m_start -> $m_end]"
     return 0
   fi
   size=$(src_size "$1"); size=${size:-0}
@@ -67,7 +70,8 @@ mirror() {
     --dest-creds "$REG_USER:$REG_PASS" \
     "$src" "$dst"
   local el=$((SECONDS - t))
-  echo ">> mirror done in ${el}s"
+  m_end="$(date '+%Y.%m.%d %H:%M:%S')"
+  echo ">> mirror done in ${el}s [$m_start -> $m_end]"
 }
 
 login() {
