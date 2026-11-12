@@ -60,9 +60,8 @@ if [ -f "$FAILMEMO" ] && [ "${FORCE:-0}" != 1 ]; then
 fi
 
 case "$TYPE" in
-  jib)    command -v java >/dev/null || fail "JDK not installed on LS (needs JDK 21: apt install openjdk-21-jdk)" 21 ;;
-  docker) command -v docker >/dev/null || fail "Docker not installed on LS (apt install docker.io, then systemctl enable --now docker)" 21 ;;
-  *)      fail "invalid BUILD_TYPE: $TYPE (jib or docker)" 78 ;;
+  jib|docker) ;;
+  *)          fail "invalid BUILD_TYPE: $TYPE (jib or docker)" 78 ;;
 esac
 command -v git >/dev/null && command -v skopeo >/dev/null || fail "git or skopeo missing on LS" 21
 
@@ -82,6 +81,15 @@ rm -rf "$src"; mkdir -p "$src"
   git checkout -q --detach FETCH_HEAD
 ) >> "$BLOG" 2>&1 || { echo "$sha $(date +%s)" > "$FAILMEMO"; tail -n 15 "$BLOG" | cut -c1-300 | sed 's/^/   | /' >&2; fail "fetching source $REPO@${sha:0:7} failed" 20; }
 log "build: source fetched (${SECONDS}s)"
+
+# Only require the tool a build will actually use: jib always builds (needs java); docker only needs
+# the docker binary when a Dockerfile is actually there -- a repo with none takes the skopeo-only
+# fallback in run_build below (mirrors the compose file's prebuilt image, never touches docker).
+if [ "$TYPE" = jib ]; then
+  command -v java >/dev/null || fail "JDK not installed on LS (needs JDK 21: apt install openjdk-21-jdk)" 21
+elif [ -f "$src/${BUILD_CONTEXT:-.}/${BUILD_DOCKERFILE:-Dockerfile}" ]; then
+  command -v docker >/dev/null || fail "Docker not installed on LS (apt install docker.io, then systemctl enable --now docker)" 21
+fi
 
 # heartbeat so the bot/Telegram side knows the build is still running
 # (sleep runs in the background then is waited on, so killing this loop also kills the sleep and doesn't hold stdout open)
