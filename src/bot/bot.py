@@ -17,7 +17,13 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    Update,
+)
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
@@ -601,6 +607,10 @@ async def post_init(app: Application) -> None:
     cmds += [BotCommand(n, j["desc"]) for n, j in JOBS.items()]
     try:
         await app.bot.set_my_commands(cmds)
+        await app.bot.set_my_commands(cmds, scope=BotCommandScopeAllGroupChats())
+        await app.bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats())
+        if ALLOWED_CHAT is not None:
+            await app.bot.set_my_commands(cmds, scope=BotCommandScopeChat(ALLOWED_CHAT))
     except Exception:
         log.exception("Could not set the command menu")
     app.bot_data["auto_task"] = asyncio.create_task(auto_loop(app))
