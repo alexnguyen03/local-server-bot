@@ -17,8 +17,11 @@
 set -euo pipefail
 
 resolve_only=0; [ "${1:-}" = "--resolve" ] && resolve_only=1
-log()  { echo ">> $*" >&2; }
-fail() { echo "!! $1" >&2; exit "${2:-20}"; }
+# also append to $BLOG (once it's set, see below) so a failure before/between the subshells that
+# redirect into it isn't silently invisible in build.log -- this bit everyone chasing a "missing tool"
+# error with an empty build.log.
+log()  { echo ">> $*" >&2; [ -z "${BLOG:-}" ] || echo ">> $*" >> "$BLOG" 2>/dev/null || true; }
+fail() { echo "!! $1" >&2; [ -z "${BLOG:-}" ] || echo "!! $1" >> "$BLOG" 2>/dev/null || true; exit "${2:-20}"; }
 
 for v in GH_REPO APP CS_REGISTRY REG_USER REG_PASS SERVICE_DIR BUILD_BRANCH; do
   [ -n "${!v:-}" ] || fail "build on LS: missing variable $v in service.env/common.env/.secrets" 78
